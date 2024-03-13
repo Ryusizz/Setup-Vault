@@ -10,8 +10,8 @@ RUN \
 	sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys A4B469963BF863CC && \
 	apt update && \
 	apt -y install net-tools vim openssh-server tmux git curl autojump byobu && \
-	echo "PermitRootLogin yes" > /etc/ssh/sshd_config && \
-	echo "X11UseLocalhost no" > /etc/ssh/sshd_config && \
+	echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+	echo "X11UseLocalhost no" >> /etc/ssh/sshd_config && \
 	systemctl enable ssh && \
 	wget https://raw.githubusercontent.com/Ryusizz/Setup-Vault/main/.vimrc -O ~/.vimrc && \
 	mkdir -p ~/.vim/colors && wget https://raw.githubusercontent.com/nanotech/jellybeans.vim/master/colors/jellybeans.vim -P ~/.vim/colors && \
