@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  ai-testbed:
+    # [핵심] 여기서 이미지 이름을 지정합니다.
+    image: ryusizz/testbed:latest
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+
+    # [이식] --network=host
+    network_mode: host
+
+    # [이식] --shm-size 32G
+    shm_size: '32gb'
+
+    # [이식] --ipc=host
+    ipc: host
+
+    # [이식] --restart always
+    restart: always
+
+    # [이식] 볼륨 마운트 (-v)
+    volumes:
+      - /mnt/seaweedfs:/data
+      - /raid:/raid
+      # 개발 중인 현재 폴더를 workspace로 매핑 (VS Code가 사용하는 경로)
+      - .:/workspaces
+
+    # [이식] GPU 할당 (--gpus all)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+
+    # 컨테이너가 죽지 않고 계속 살아있게 함
+    command: /bin/sh -c "while sleep 1000; do :; done"
