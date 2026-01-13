@@ -1,0 +1,26 @@
+{
+  "name": "AI Testbed",
+  // Dockerfile 대신 docker-compose 파일을 지정
+  "dockerComposeFile": "docker-compose.yml",
+  // docker-compose.yml에 정의된 서비스 이름
+  "service": "ai-testbed",
+  // 컨테이너 내부의 작업 경로
+  "workspaceFolder": "/workspaces",
+  // 1. SSH 서비스 시작 (매번 실행)
+  "postStartCommand": "service ssh start",
+  // 2. 비밀번호 설정 (생성 시 1회)
+  "postCreateCommand": "echo 'root:27tp.dlsfbgus' | chpasswd",
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "njpwerner.autodocstring"
+      ]
+    }
+  }
+}
