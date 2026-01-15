@@ -1,0 +1,52 @@
+# 전체 설정에서 제외할 파일들 (Global Exclude)
+# 예: 마이그레이션 파일, 빌드 아티팩트 등은 검사하지 않음
+exclude: ^(docs/|migrations/|.git/|.tox/|.venv/)
+
+repos:
+  # 1. 기본 정리 도구 (공백, 엔터, 대용량 파일 등)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0 # 터미널에서 'pre-commit autoupdate'로 최신화 가능
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  # 2. Import 정렬 (Isort) - 실행 순서 중요: Black보다 먼저 실행 추천
+  - repo: https://github.com/pycqa/isort
+    rev: 7.0.0
+    hooks:
+      - id: isort
+        # [핵심] Black과 호환되도록 프로필 설정
+        args: ["--profile", "black", "--line-length", "120"]
+
+  # 3. Python 코드 포맷팅 (Black)
+  - repo: https://github.com/psf/black
+    rev: 25.12.0
+    hooks:
+      - id: black
+        args: ["--line-length", "120"]
+
+  # 4. Python 코드 검사 (Flake8)
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        # args 설명:
+        # --max-line-length=120: 줄 길이 제한
+        # --ignore 목록:
+        #   E203: 슬라이싱(:) 앞 공백 (Black과 충돌)
+        #   E226: 산술 연산자 주변 공백 (Black이 우선순위에 따라 붙여 쓸 수 있음) <--- 추가됨
+        #   F401: 사용 안 한 import (Isort가 자동 삭제하므로 무시해도 됨)
+        #   W503: 줄바꿈 전 연산자 (Black 스타일 호환)
+        args: ["--max-line-length=120", "--ignore=E203,E226,F401,W503"]
+
+  # 5. 비-Python 파일 포맷팅 (Prettier) - 신규 추가
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        # [핵심] Python 파일은 절대 건드리지 않음 (Black과의 충돌 방지)
+        exclude: \.py$
+        # 필요하다면 Markdown 등에서도 줄바꿈 설정을 맞춤
+        # args: ["--print-width", "120"]
