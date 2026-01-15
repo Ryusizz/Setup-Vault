@@ -35,4 +35,4 @@ set fileencodings=utf8,euc-kr
 set fencs=ucs-bom,utf8,euc-kr  "파일읽기 시도순서
 
 " 컬러스킴 사용
-colorscheme jellybeans 
+colorscheme jellybeans

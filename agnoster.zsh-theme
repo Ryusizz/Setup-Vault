@@ -122,7 +122,7 @@ prompt_git() {
     dirty=$(parse_git_dirty)
     ref=$(git symbolic-ref HEAD 2> /dev/null) || \
     ref="◈ $(git describe --exact-match --tags HEAD 2> /dev/null)" || \
-    ref="➦ $(git rev-parse --short HEAD 2> /dev/null)" 
+    ref="➦ $(git rev-parse --short HEAD 2> /dev/null)"
     if [[ -n $dirty ]]; then
 #       color=229
       color=228
