@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   ai-testbed:
@@ -15,7 +15,7 @@ services:
     network_mode: host
 
     # [이식] --shm-size 32G
-    shm_size: '32gb'
+    shm_size: "32gb"
 
     # [이식] --ipc=host
     ipc: host
@@ -37,7 +37,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [ gpu ]
+              capabilities: [gpu]
 
     # 컨테이너가 죽지 않고 계속 살아있게 함
     command: /bin/sh -c "while sleep 1000; do :; done"
