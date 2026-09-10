@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# agent-acct — manage the claude/codex login accounts used by the -u wrappers.
+set -uo pipefail
+
+AA_SELF="${BASH_SOURCE[0]}"
+while [ -L "$AA_SELF" ]; do
+  AA_LINK="$(readlink "$AA_SELF")"
+  case "$AA_LINK" in
+    /*) AA_SELF="$AA_LINK" ;;
+    *)  AA_SELF="$(dirname "$AA_SELF")/$AA_LINK" ;;
+  esac
+done
+AA_ROOT="$(cd -- "$(dirname -- "$AA_SELF")" && pwd)"
+# shellcheck source=lib.sh
+. "$AA_ROOT/lib.sh"
+
+usage() {
+  cat >&2 <<'USAGE'
+agent-acct — claude / codex 다중 계정 관리
+
+  agent-acct list                       계정 목록과 로그인 상태
+  agent-acct add [<id>]                 새 계정 등록 (대화형)
+  agent-acct adopt <id> [tool...]       지금 로그인된 계정을 <id> 라는 이름으로 편입
+  agent-acct alias <id> <alias>...      약어 추가
+  agent-acct unalias <id> <alias>...    약어 제거
+  agent-acct login <tool> <id> [인자…]  해당 계정으로 로그인
+                                        codex 는 기본이 --device-auth 입니다
+  agent-acct logout <tool> <id>         해당 계정 로그아웃
+  agent-acct status [<id>]              로그인 상태만 출력
+  agent-acct sync [<id>]                오버레이 심볼릭 링크 재동기화
+  agent-acct which <alias>              약어 -> 계정 ID
+  agent-acct rm <id>                    계정 등록 해제 (오버레이 삭제 여부 확인)
+  agent-acct doctor                     설치/PATH/공유 저장소 점검
+  agent-acct path <tool> <id>           해당 계정의 CLI home 경로
+
+  tool = claude | codex   (생략 시 둘 다)
+
+사용 예:
+  claude -u d2                 # d2 계정으로 Claude Code 실행
+  codex --user alice exec "…"  # alice 계정으로 Codex 실행
+USAGE
+  exit 2
+}
+
+_tools_or_all() {
+  if [ $# -eq 0 ]; then aa_tools; else printf '%s\n' "$@"; fi
+}
+
+cmd_list() {
+  local rows; rows="$(aa_reg table)"
+  if [ -z "$rows" ]; then
+    aa_warn "등록된 계정이 없습니다. 'agent-acct adopt <id>' 로 현재 로그인을 편입하거나 'agent-acct add' 로 추가하세요."
+    return 0
+  fi
+  local id aliases label mclaude mcodex sclaude scodex
+  {
+    printf 'ID\tALIASES\tLABEL\tCLAUDE\tCODEX\n'
+    while IFS=$'\t' read -r id aliases label mclaude mcodex; do
+      sclaude="$(aa_login_status claude "$id")"
+      scodex="$(aa_login_status codex "$id")"
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$id" "$aliases" "$label" "$sclaude [$mclaude]" "$scodex [$mcodex]"
+    done <<< "$rows"
+  } | aa_render_table
+}
+
+
+cmd_add() {
+  local suggested="${1:-}" new_id new_aliases new_label
+  # Non-interactive form: agent-acct add <id> [--alias a,b] [--label L]
+  if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ ! -t 0 ]; }; then
+    local id; id="$(aa_reg add "$@")" || exit 1
+    aa_msg "계정 '$id' 등록 완료."
+    return 0
+  fi
+  [ -t 0 ] || aa_die "대화형 터미널이 필요합니다. 'agent-acct add <id> --alias a,b --label L' 형태로도 등록할 수 있습니다."
+  local id attempts=0
+  while :; do
+    read -r -p "  계정 ID${suggested:+ [$suggested]}: " new_id
+    new_id="${new_id:-$suggested}"
+    if [ -z "$new_id" ]; then
+      aa_warn "계정 ID는 비울 수 없습니다."
+    else
+      read -r -p "  약어 (공백/쉼표 구분, 없으면 Enter): " new_aliases
+      read -r -p "  표시 이름 (선택): " new_label
+      if id="$(aa_reg add "$new_id" --alias "${new_aliases:-}" --label "${new_label:-}")"; then
+        break
+      fi
+    fi
+    attempts=$((attempts + 1))
+    [ "$attempts" -ge 3 ] && aa_die "등록에 실패했습니다."
+    aa_warn "다시 입력해 주세요."
+  done
+  aa_msg "계정 '$id' 등록 완료. 'agent-acct login claude $id' 로 로그인하세요."
+}
+
+# adopt <id> [tool...] — claim the CLI's existing (native) login under a name
+cmd_adopt() {
+  [ $# -ge 1 ] || usage
+  local id="$1"; shift
+  local tools=(); mapfile -t tools < <(_tools_or_all "$@")
+
+  local existing
+  if existing="$(aa_reg resolve "$id" 2>/dev/null)"; then
+    id="$existing"
+  else
+    aa_reg add "$id" >/dev/null || exit 1
+    aa_msg "계정 '$id' 등록됨."
+  fi
+
+  local tool shared holder
+  for tool in "${tools[@]}"; do
+    shared="$(aa_shared_dir "$tool")"
+    if ! aa_has_creds "$tool" "$shared"; then
+      aa_warn "$tool: 현재 $shared 에 로그인 정보가 없어 건너뜁니다."
+      continue
+    fi
+    if holder="$(aa_reg native-holder "$tool" 2>/dev/null)"; then
+      if [ "$holder" != "$id" ]; then
+        aa_warn "$tool: 이미 '$holder' 가 기본(native) 저장소를 갖고 있어 건너뜁니다."
+        continue
+      fi
+    fi
+    aa_reg set-mode "$id" "$tool" native || exit 1
+    aa_msg "$tool: 현재 로그인($(aa_login_status "$tool" "$id")) 을 '$id' 로 편입했습니다 → $shared"
+  done
+  cmd_status "$id"
+}
+
+cmd_login() {
+  [ $# -ge 2 ] || usage
+  local tool="$1" id_in="$2"; shift 2
+  local id; id="$(aa_reg resolve "$id_in")" || aa_die "알 수 없는 계정: $id_in"
+  aa_login "$tool" "$id" "$@"
+}
+
+cmd_logout() {
+  [ $# -eq 2 ] || usage
+  local tool="$1" id_in="$2" id store real
+  id="$(aa_reg resolve "$id_in")" || aa_die "알 수 없는 계정: $id_in"
+  store="$(aa_store_dir "$tool" "$id")"
+  real="$(aa_real_bin "$tool")" || aa_die "'$tool' 실행 파일을 찾을 수 없습니다."
+  case "$tool" in
+    claude) CLAUDE_CONFIG_DIR="$store" "$real" auth logout ;;
+    codex)  CODEX_HOME="$store" "$real" logout ;;
+  esac
+}
+
+cmd_status() {
+  local ids=() id tool
+  if [ $# -ge 1 ]; then
+    id="$(aa_reg resolve "$1")" || aa_die "알 수 없는 계정: $1"
+    ids=("$id")
+  else
+    mapfile -t ids < <(aa_reg ids)
+  fi
+  for id in "${ids[@]}"; do
+    printf '%s\n' "$id"
+    for tool in $(aa_tools); do
+      printf '  %-7s %-10s %s\n' "$tool" "[$(aa_reg mode "$id" "$tool")]" "$(aa_login_status "$tool" "$id")"
+    done
+  done
+}
+
+cmd_sync() {
+  local ids=() id tool
+  if [ $# -ge 1 ]; then
+    id="$(aa_reg resolve "$1")" || aa_die "알 수 없는 계정: $1"
+    ids=("$id")
+  else
+    mapfile -t ids < <(aa_reg ids)
+  fi
+  for id in "${ids[@]}"; do
+    for tool in $(aa_tools); do
+      [ "$(aa_reg mode "$id" "$tool")" = native ] && continue
+      [ -d "$(aa_shared_dir "$tool")/.accounts/$id" ] || continue
+      aa_sync_overlay "$tool" "$id"
+      aa_msg "$tool/$id 동기화 완료"
+    done
+  done
+}
+
+cmd_rm() {
+  [ $# -eq 1 ] || usage
+  local id; id="$(aa_reg resolve "$1")" || aa_die "알 수 없는 계정: $1"
+  local tool overlay dirs=()
+  for tool in $(aa_tools); do
+    overlay="$(aa_shared_dir "$tool")/.accounts/$id"
+    [ -d "$overlay" ] && dirs+=("$overlay")
+  done
+  aa_reg rm "$id" >/dev/null || exit 1
+  aa_msg "계정 '$id' 등록 해제됨."
+  if [ ${#dirs[@]} -gt 0 ]; then
+    printf '  삭제 대상 오버레이:\n' >&2
+    printf '    %s\n' "${dirs[@]}" >&2
+    if [ -t 0 ]; then
+      read -r -p "  이 디렉터리들을 지울까요? (로그인 토큰이 사라집니다) [y/N] " reply
+      case "${reply:-N}" in
+        [yY]*) rm -rf -- "${dirs[@]}"; aa_msg "삭제했습니다." ;;
+        *) aa_msg "남겨뒀습니다." ;;
+      esac
+    else
+      aa_warn "오버레이는 남겨뒀습니다. 필요하면 직접 지우세요."
+    fi
+  fi
+}
+
+cmd_which() { [ $# -eq 1 ] || usage; aa_reg resolve "$1" || aa_die "알 수 없는 계정: $1"; }
+
+cmd_path() {
+  [ $# -eq 2 ] || usage
+  local id; id="$(aa_reg resolve "$2")" || aa_die "알 수 없는 계정: $2"
+  aa_store_dir "$1" "$id"
+}
+
+cmd_doctor() {
+  local ok=0 tool real wdir shared
+  wdir="$AA_ROOT/bin"
+  printf 'wrapper dir : %s\n' "$wdir"
+  printf 'registry    : %s\n' "$AGENT_ACCT_REGISTRY"
+  for tool in $(aa_tools); do
+    shared="$(aa_shared_dir "$tool")"
+    printf '\n[%s]\n' "$tool"
+    printf '  shared store : %s\n' "$shared"
+    if [ ! -d "$shared" ]; then printf '  \033[31m공유 저장소가 없습니다\033[0m\n'; ok=1; fi
+    if real="$(aa_real_bin "$tool")"; then
+      printf '  real binary  : %s\n' "$real"
+    else
+      printf '  \033[31mreal binary를 PATH에서 찾지 못했습니다\033[0m\n'; ok=1
+    fi
+    local onpath; onpath="$(command -v "$tool" 2>/dev/null || true)"
+    printf '  PATH 우선순위: %s' "${onpath:-<없음>}"
+    if [ "$(dirname "${onpath:-/nonexistent}")" = "$(cd -- "$wdir" 2>/dev/null && pwd)" ]; then
+      printf '  \033[32m(wrapper 활성)\033[0m\n'
+    else
+      printf '  \033[33m(wrapper 비활성 — install.sh 를 실행하고 셸을 다시 여세요)\033[0m\n'; ok=1
+    fi
+  done
+  printf '\n'
+  cmd_list
+  return $ok
+}
+
+[ $# -ge 1 ] || usage
+sub="$1"; shift
+case "$sub" in
+  list|ls)     cmd_list "$@" ;;
+  add)         cmd_add "$@" ;;
+  adopt)       cmd_adopt "$@" ;;
+  alias)       aa_reg alias "$@" ;;
+  unalias)     aa_reg unalias "$@" ;;
+  login)       cmd_login "$@" ;;
+  logout)      cmd_logout "$@" ;;
+  status)      cmd_status "$@" ;;
+  sync)        cmd_sync "$@" ;;
+  which)       cmd_which "$@" ;;
+  rm|remove)   cmd_rm "$@" ;;
+  path)        cmd_path "$@" ;;
+  doctor)      cmd_doctor "$@" ;;
+  dump)        aa_reg dump ;;
+  -h|--help|help) usage ;;
+  *) aa_err "알 수 없는 명령: $sub"; usage ;;
+esac

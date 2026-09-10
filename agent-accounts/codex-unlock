@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Stop the Codex process that owns one thread's writer lock.
+set -Eeuo pipefail
+
+readonly program_name="${0##*/}"
+
+usage() {
+  cat <<EOF
+Usage: $program_name [--yes] [--force] [--dry-run] [--codex-home DIR] [THREAD]
+
+Find and stop a Codex process that currently owns a thread writer lock.
+
+With no THREAD, discover active writers automatically. If there is more than
+one, choose from a numbered list. THREAD is an optional filter and may be a
+thread UUID, a rollout JSONL path, or a quoted error message containing one.
+
+Options:
+  -n, --dry-run         Show the lock owner without sending a signal.
+  -y, --yes             Do not ask before sending SIGTERM.
+  -f, --force           Send SIGKILL if SIGTERM has not worked after 5 seconds.
+      --codex-home DIR  Use DIR instead of \$CODEX_HOME or \$HOME/.codex.
+  -h, --help            Show this help.
+
+Examples:
+  $program_name
+  $program_name --dry-run
+  $program_name 01a0855a-f821-7503-83e1-905ce7ae2782
+  $program_name --yes --force 01a0855a-f821-7503-83e1-905ce7ae2782
+EOF
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+dry_run=false
+assume_yes=false
+force_kill=false
+codex_root=""
+target=""
+
+while (($#)); do
+  case "$1" in
+    -n|--dry-run)
+      dry_run=true
+      ;;
+    -y|--yes)
+      assume_yes=true
+      ;;
+    -f|--force)
+      force_kill=true
+      ;;
+    --codex-home)
+      (($# >= 2)) || die "--codex-home requires a directory"
+      codex_root="$2"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# == 1)) || die "provide exactly one THREAD after --"
+      target="$1"
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      [[ -z "$target" ]] || die "provide exactly one THREAD (quote a full error message)"
+      target="$1"
+      ;;
+  esac
+  shift
+done
+
+command -v lslocks >/dev/null 2>&1 || die "lslocks is required (normally provided by util-linux)"
+command -v ps >/dev/null 2>&1 || die "ps is required"
+
+wanted_thread=""
+if [[ -n "$target" ]]; then
+  wanted_thread="$({ printf '%s\n' "$target" | grep -Eo '[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}' || true; } | head -n1 | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$wanted_thread" ]] || die "THREAD does not contain a UUID"
+fi
+
+if [[ -z "$codex_root" ]]; then
+  if [[ -n "${CODEX_HOME:-}" ]]; then
+    codex_root="$CODEX_HOME"
+  else
+    [[ -n "${HOME:-}" ]] || die "neither CODEX_HOME nor HOME is set"
+    codex_root="$HOME/.codex"
+  fi
+fi
+
+[[ "$codex_root" = /* ]] || die "Codex home must be an absolute path: $codex_root"
+lock_dir="$codex_root/thread-writer-locks"
+[[ -d "$lock_dir" ]] || die "writer-lock directory does not exist: $lock_dir"
+lock_dir="$(readlink -f "$lock_dir")"
+
+holder_pids=()
+thread_ids=()
+lock_paths=()
+while read -r lock_pid lock_type lock_mode locked_path; do
+  [[ "$lock_type" == "FLOCK" && "$lock_mode" == "WRITE" ]] || continue
+  [[ "$lock_pid" =~ ^[0-9]+$ ]] || continue
+  [[ "$locked_path" == "$lock_dir/"*.lock ]] || continue
+  candidate_thread="${locked_path##*/}"
+  candidate_thread="${candidate_thread%.lock}"
+  [[ "$candidate_thread" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || continue
+  candidate_thread="$(printf '%s' "$candidate_thread" | tr '[:upper:]' '[:lower:]')"
+  [[ -z "$wanted_thread" || "$candidate_thread" == "$wanted_thread" ]] || continue
+  holder_pids+=("$lock_pid")
+  thread_ids+=("$candidate_thread")
+  lock_paths+=("$locked_path")
+done < <(lslocks --noheadings --raw --notruncate --output PID,TYPE,MODE,PATH)
+
+if ((${#holder_pids[@]} == 0)); then
+  if [[ -n "$wanted_thread" && -e "$lock_dir/$wanted_thread.lock" ]]; then
+    printf 'No process currently holds the writer lock for thread %s.\n' "$wanted_thread"
+    printf 'The empty lock file may remain normally; its presence alone does not mean it is locked.\n'
+  elif [[ -n "$wanted_thread" ]]; then
+    printf 'No writer lock exists for thread %s.\n' "$wanted_thread"
+  else
+    printf 'No active Codex thread writers found under %s.\n' "$lock_dir"
+  fi
+  exit 0
+fi
+
+print_candidate() {
+  local array_index="$1" display_index="$2" candidate_pid candidate_cwd
+  candidate_pid="${holder_pids[$array_index]}"
+  candidate_cwd="$(readlink "/proc/$candidate_pid/cwd" 2>/dev/null || printf '?')"
+  printf '[%s] Thread: %s\n' "$display_index" "${thread_ids[$array_index]}"
+  printf '    Lock:   %s\n' "${lock_paths[$array_index]}"
+  printf '    CWD:    %s\n' "$candidate_cwd"
+  printf '    Owner:  '
+  ps -o user=,pid=,ppid=,lstart=,tty=,stat=,args= -p "$candidate_pid" || printf 'PID %s disappeared\n' "$candidate_pid"
+}
+
+selected_index=0
+if [[ -z "$wanted_thread" ]]; then
+  printf 'Found %d active Codex thread writer(s):\n' "${#holder_pids[@]}"
+  for array_index in "${!holder_pids[@]}"; do
+    print_candidate "$array_index" "$((array_index + 1))"
+  done
+
+  if [[ "$dry_run" == true ]]; then
+    printf 'Dry run: no signal sent.\n'
+    exit 0
+  fi
+
+  if ((${#holder_pids[@]} > 1)); then
+    [[ -t 0 ]] || die "multiple writers found; run interactively to choose one, or pass an optional THREAD filter"
+    while :; do
+      printf 'Select a writer to stop [1-%d, q to cancel]: ' "${#holder_pids[@]}"
+      read -r selection
+      [[ "$selection" == "q" || "$selection" == "Q" ]] && {
+        printf 'Cancelled.\n'
+        exit 0
+      }
+      if [[ "$selection" =~ ^[0-9]+$ ]] && ((selection >= 1 && selection <= ${#holder_pids[@]})); then
+        selected_index="$((selection - 1))"
+        break
+      fi
+      printf 'Invalid selection.\n' >&2
+    done
+  fi
+fi
+
+holder_pid="${holder_pids[$selected_index]}"
+thread_id="${thread_ids[$selected_index]}"
+lock_path="${lock_paths[$selected_index]}"
+
+[[ -r "/proc/$holder_pid/exe" ]] || die "lock owner PID $holder_pid disappeared; retry"
+holder_exe="$(readlink "/proc/$holder_pid/exe" 2>/dev/null || true)"
+holder_name="${holder_exe##*/}"
+[[ "$holder_name" == "codex" ]] || die "PID $holder_pid owns the lock but executable is '$holder_exe'; refusing to kill it"
+[[ "$holder_pid" != "$$" && "$holder_pid" != "$PPID" ]] || die "refusing to signal this script or its parent"
+
+if [[ -n "$wanted_thread" ]]; then
+  print_candidate "$selected_index" 1
+elif ((${#holder_pids[@]} > 1)); then
+  printf 'Selected writer %d (thread %s, PID %s).\n' "$((selected_index + 1))" "$thread_id" "$holder_pid"
+fi
+
+if [[ "$dry_run" == true ]]; then
+  printf 'Dry run: no signal sent.\n'
+  exit 0
+fi
+
+if [[ "$assume_yes" != true ]]; then
+  [[ -t 0 ]] || die "refusing to kill non-interactively without --yes"
+  printf 'Send SIGTERM to this Codex writer? [y/N] '
+  read -r answer
+  [[ "$answer" == "y" || "$answer" == "Y" ]] || {
+    printf 'Cancelled.\n'
+    exit 0
+  }
+fi
+
+kill -TERM "$holder_pid" 2>/dev/null || die "failed to send SIGTERM to PID $holder_pid"
+
+for _ in {1..50}; do
+  kill -0 "$holder_pid" 2>/dev/null || break
+  sleep 0.1
+done
+
+if kill -0 "$holder_pid" 2>/dev/null; then
+  if [[ "$force_kill" != true ]]; then
+    if [[ -t 0 ]]; then
+      printf 'PID %s is still alive after 5 seconds. Send SIGKILL? [y/N] ' "$holder_pid"
+      read -r answer
+      [[ "$answer" == "y" || "$answer" == "Y" ]] || die "writer is still running (rerun with --force to kill it)"
+    else
+      die "writer is still running (rerun with --force to kill it)"
+    fi
+  fi
+  kill -KILL "$holder_pid" 2>/dev/null || die "failed to send SIGKILL to PID $holder_pid"
+fi
+
+for _ in {1..20}; do
+  lock_still_held=false
+  while read -r check_pid check_type check_mode check_path; do
+    if [[ "$check_path" == "$lock_path" && "$check_type" == "FLOCK" && "$check_mode" == "WRITE" ]]; then
+      lock_still_held=true
+      break
+    fi
+  done < <(lslocks --noheadings --raw --notruncate --output PID,TYPE,MODE,PATH)
+  [[ "$lock_still_held" == false ]] && break
+  sleep 0.1
+done
+
+[[ "$lock_still_held" == false ]] || die "process was signalled, but the writer lock is still held"
+printf 'Writer lock released. You can now run: codex resume %s\n' "$thread_id"

@@ -1,0 +1,10 @@
+# Personal / machine-specific — never commit (public repo).
+# MobaXterm session bookmarks expose internal hosts, ports, and accounts.
+MobaXterm Sessions.mxtsessions
+
+# Local-only secrets, if any land here.
+*.pem
+*.key
+.env
+.env.*
+!.env.example

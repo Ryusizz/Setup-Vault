@@ -1,0 +1,38 @@
+{
+  "name": "jhryu-reach-1",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces,type=bind",
+  "workspaceFolder": "/workspaces",
+  "mounts": [
+    "source=/mnt/seaweedfs,target=/data,type=bind",
+    "source=/raid,target=/raid,type=bind"
+  ],
+  "runArgs": [
+    "--gpus=all",
+    "--shm-size=32gb",
+    "--ipc=host",
+    "--restart=unless-stopped",
+    "--name=jhryu-reach-1",
+    "-p",
+    "2221:22"
+  ],
+  "postStartCommand": "service ssh start",
+  "postCreateCommand": "if [ -n \"${localEnv:DEVCONTAINER_ROOT_PASSWORD}\" ]; then echo \"root:${localEnv:DEVCONTAINER_ROOT_PASSWORD}\" | chpasswd; else echo '[devcontainer] set DEVCONTAINER_ROOT_PASSWORD on the host to enable root password login'; fi",
+  "remoteUser": "root",
+  "shutdownAction": "none",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "njpwerner.autodocstring"
+      ]
+    }
+  }
+}
