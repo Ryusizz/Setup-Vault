@@ -78,8 +78,9 @@ while (($#)); do
   shift
 done
 
-command -v lslocks >/dev/null 2>&1 || die "lslocks is required (normally provided by util-linux)"
 command -v ps >/dev/null 2>&1 || die "ps is required"
+command -v stat >/dev/null 2>&1 || die "stat is required"
+[[ -r /proc/locks ]] || die "/proc/locks is not readable; this tool needs Linux procfs"
 
 wanted_thread=""
 if [[ -n "$target" ]]; then
@@ -101,13 +102,52 @@ lock_dir="$codex_root/thread-writer-locks"
 [[ -d "$lock_dir" ]] || die "writer-lock directory does not exist: $lock_dir"
 lock_dir="$(readlink -f "$lock_dir")"
 
+# lslocks can only show a lock's PATH when it manages to walk the owning mount
+# back to the file; inside a container whose $HOME lives on its own device it
+# prints an empty PATH, which silently hid every writer. Match /proc/locks
+# entries to the lock files by device+inode instead, which always resolves.
+write_lock_holders() {
+  local lock_file dev_major dev_minor dev_num inode key
+  local -A owner_of_inode=()
+  for lock_file in "$lock_dir"/*.lock; do
+    [[ -e "$lock_file" ]] || continue
+    # %t/%T describe a device node's own type and are 0 for regular files, so
+    # take the containing device from %d and split it the way the kernel does.
+    read -r dev_num inode < <(stat -c '%d %i' "$lock_file" 2>/dev/null) || continue
+    [[ "$dev_num" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || continue
+    dev_major="$(((dev_num >> 8) & 0xfff))"
+    dev_minor="$(((dev_num & 0xff) | ((dev_num >> 12) & 0xfff00)))"
+    key="$dev_major:$dev_minor:$inode"
+    owner_of_inode["$key"]="$lock_file"
+  done
+  ((${#owner_of_inode[@]} > 0)) || return 0
+
+  local line lock_type lock_mode lock_pid lock_dev
+  local -a fields
+  while read -r line; do
+    # shellcheck disable=SC2206
+    fields=($line)
+    ((${#fields[@]} >= 6)) || continue
+    # "N: -> FLOCK ..." is a blocked waiter, not the holder.
+    [[ "${fields[1]}" == "->" ]] && continue
+    lock_type="${fields[1]}"
+    lock_mode="${fields[3]}"
+    lock_pid="${fields[4]}"
+    lock_dev="${fields[5]}"
+    [[ "$lock_type" == "FLOCK" && "$lock_mode" == "WRITE" ]] || continue
+    [[ "$lock_pid" =~ ^[0-9]+$ ]] || continue
+    IFS=: read -r dev_major dev_minor inode <<<"$lock_dev"
+    [[ -n "$dev_major" && -n "$dev_minor" && -n "$inode" ]] || continue
+    key="$((16#$dev_major)):$((16#$dev_minor)):$inode"
+    [[ -n "${owner_of_inode[$key]:-}" ]] || continue
+    printf '%s\t%s\n' "$lock_pid" "${owner_of_inode[$key]}"
+  done < /proc/locks
+}
+
 holder_pids=()
 thread_ids=()
 lock_paths=()
-while read -r lock_pid lock_type lock_mode locked_path; do
-  [[ "$lock_type" == "FLOCK" && "$lock_mode" == "WRITE" ]] || continue
-  [[ "$lock_pid" =~ ^[0-9]+$ ]] || continue
-  [[ "$locked_path" == "$lock_dir/"*.lock ]] || continue
+while IFS=$'\t' read -r lock_pid locked_path; do
   candidate_thread="${locked_path##*/}"
   candidate_thread="${candidate_thread%.lock}"
   [[ "$candidate_thread" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || continue
@@ -116,7 +156,7 @@ while read -r lock_pid lock_type lock_mode locked_path; do
   holder_pids+=("$lock_pid")
   thread_ids+=("$candidate_thread")
   lock_paths+=("$locked_path")
-done < <(lslocks --noheadings --raw --notruncate --output PID,TYPE,MODE,PATH)
+done < <(write_lock_holders)
 
 if ((${#holder_pids[@]} == 0)); then
   if [[ -n "$wanted_thread" && -e "$lock_dir/$wanted_thread.lock" ]]; then
@@ -227,12 +267,12 @@ fi
 
 for _ in {1..20}; do
   lock_still_held=false
-  while read -r check_pid check_type check_mode check_path; do
-    if [[ "$check_path" == "$lock_path" && "$check_type" == "FLOCK" && "$check_mode" == "WRITE" ]]; then
+  while IFS=$'\t' read -r check_pid check_path; do
+    if [[ "$check_path" == "$lock_path" ]]; then
       lock_still_held=true
       break
     fi
-  done < <(lslocks --noheadings --raw --notruncate --output PID,TYPE,MODE,PATH)
+  done < <(write_lock_holders)
   [[ "$lock_still_held" == false ]] && break
   sleep 0.1
 done
