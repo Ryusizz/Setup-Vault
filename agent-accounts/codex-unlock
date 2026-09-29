@@ -177,7 +177,10 @@ lock_path="${lock_paths[$selected_index]}"
 
 [[ -r "/proc/$holder_pid/exe" ]] || die "lock owner PID $holder_pid disappeared; retry"
 holder_exe="$(readlink "/proc/$holder_pid/exe" 2>/dev/null || true)"
+# A codex whose binary was replaced on disk (npm update) reads as
+# ".../bin/codex (deleted)" — still the same running codex, so strip the marker.
 holder_name="${holder_exe##*/}"
+holder_name="${holder_name% (deleted)}"
 [[ "$holder_name" == "codex" ]] || die "PID $holder_pid owns the lock but executable is '$holder_exe'; refusing to kill it"
 [[ "$holder_pid" != "$$" && "$holder_pid" != "$PPID" ]] || die "refusing to signal this script or its parent"
 
