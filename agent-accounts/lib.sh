@@ -21,11 +21,14 @@ export AGENT_ACCT_REGISTRY="${AGENT_ACCT_REGISTRY:-$AA_CLAUDE_SHARED/.accounts/r
 #   claude: oauth tokens, the account-scoped config blob and its backups, and the
 #           background-agent daemon (its lock/state assume one identity; sharing
 #           it would run jobs under whichever account happened to start it).
-#   codex:  oauth tokens and the per-tier model cache.
+#   codex:  oauth tokens, the per-tier model cache, and the app-server daemon
+#           dirs (pid/lock/unix socket are per-CODEX_HOME; codex also refuses a
+#           symlinked socket dir: "exists and is not a directory").
 AA_PRIVATE_claude=(.credentials.json .claude.json .claude.json.backup backups
                    daemon daemon.lock daemon.log daemon.status.json
                    jobs statsig tmp .tmp)
-AA_PRIVATE_codex=(auth.json models_cache.json tmp .tmp)
+AA_PRIVATE_codex=(auth.json models_cache.json tmp .tmp
+                  app-server-daemon app-server-control)
 
 # Never symlinked (overlay parent / registry home).
 AA_SKIP=(.accounts)
