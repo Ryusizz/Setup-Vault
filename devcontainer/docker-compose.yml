@@ -1,0 +1,84 @@
+# 범용 GPU devcontainer compose — CRS-Robot 프로젝트에서 검증된 구성의 일반화판.
+#
+# 머신/사용자별 값은 전부 .env 에 산다 (gitignored). .env.example 을 복사해 채운다.
+#
+# 파생 시 자주 바꾸는 것:
+#   - network_mode: host 가 필요한 워크로드(WebRTC 스트리밍 등)면 `ports:` 블록을
+#     지우고 network_mode: host 로 바꾼다. 이때 sshd 는 호스트의 22번과 충돌하므로
+#     devcontainer.json postStart 의 `service ssh start` 도 빼야 한다 — 접속은
+#     docker exec / VS Code attach 로.
+#   - 벤더 베이스 이미지가 HEALTHCHECK 를 갖고 있으면 (예: Isaac 은 앱 로그를 grep)
+#     dev 컨테이너에선 영원히 unhealthy 이므로 아래를 추가:
+#       healthcheck:
+#         disable: true
+#   - 프로젝트 전용 캐시/상태 마운트는 volumes 에 추가하고, 반드시 init-host.sh 에도
+#     사전 생성+chown 을 추가한다 (안 하면 Docker 가 root 소유로 자동 생성한다).
+
+name: ${COMPOSE_PROJECT_NAME:-devbox}
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # BASE_IMAGE 를 바꿀 땐 Dockerfile 상단의 파생 체크리스트를 먼저 볼 것.
+        DEV_UID: ${DEV_UID:-1000}
+        DEV_GID: ${DEV_GID:-1000}
+        INSTALL_CLAUDE_CODE: ${INSTALL_CLAUDE_CODE:-true}
+        INSTALL_CODEX: ${INSTALL_CODEX:-false}
+    image: ${IMAGE_NAME:-devbox:latest}
+    container_name: ${CONTAINER_NAME:-devbox}
+
+    # --- runtime ---
+    shm_size: '32gb'
+    ipc: host
+    restart: unless-stopped
+    # PID 1 이 죽으면 compose 컨테이너는 내려간다. attach 용으로 살려 둔다.
+    command: sleep infinity
+    # tini 를 PID 1 로 (docker --init 상당). `sleep` 은 고아 자식을 수거하지 않아서,
+    # 컨테이너가 포크하는 단명 헬퍼들 — VS Code / docker exec 세션의 sshd 핸들러,
+    # 헬스 프로브 — 가 <defunct> 좀비로 쌓인다 (장기 컨테이너에서 2,500+ 관측).
+    # tini 가 수거하고 시그널을 전달해 깔끔하게 멈춘다. 정리 스크립트로는 해결
+    # 불가 — 좀비는 부모만 수거할 수 있고 그 부모가 PID 1 이다.
+    init: true
+
+    # SSH 접속 (bridge 네트워크 기본). 호스트의 ${SSH_PORT} -> 컨테이너 22.
+    # sshd 는 pubkey 전용으로 빌드된다. authorized_keys 는
+    # docker-compose.override.yml 로 ~/.ssh 를 마운트하면 postStart 가 씨딩한다.
+    ports:
+      - "${SSH_PORT:-2222}:22"
+
+    # --- environment ---
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # devcontainer.json postCreateCommand 가 소비 — 공유 서버에서 호스트
+      # ~/.gitconfig 전달로 남의 identity 가 박히는 것을 방어.
+      - GIT_USER_NAME=${GIT_USER_NAME:-}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-}
+
+    # --- volumes ---
+    # 워크스페이스 마운트 타깃은 /workspaces/project 로 고정 (호스트 폴더 이름과
+    # 무관 — devcontainer.json workspaceFolder 와 일치해야 한다).
+    volumes:
+      - ..:/workspaces/project:cached
+
+      # AI CLI 상태 (rebuild 를 넘어 유지). Docker 의 root-owned 자동 생성을 막기
+      # 위해 init-host.sh 가 소스를 사전 생성+chown 한다.
+      - ${CLAUDE_STATE_DIR:?set CLAUDE_STATE_DIR in .env}:/home/dev/.claude
+      # claude.json 호스트 경로는 CLAUDE_STATE_DIR 의 형제 파일(<dir>.json)로
+      # 파생된다 — .env 에 별도 변수 없음. 컨테이너 타깃은 홈 루트 고정.
+      - ${CLAUDE_STATE_DIR:?set CLAUDE_STATE_DIR in .env}.json:/home/dev/.claude.json
+      - ${CODEX_STATE_DIR:?set CODEX_STATE_DIR in .env}:/home/dev/.codex
+
+      # 데이터/스토리지 마운트.
+      - ${DATA_PATH:?set DATA_PATH in .env}:/data
+
+    # --- GPU ---
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

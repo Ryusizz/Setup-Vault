@@ -1,0 +1,8 @@
+# 이 폴더를 프로젝트의 .devcontainer/ 로 복사했을 때도 그대로 적용되는 규칙.
+# 머신/개인별 파일은 추적하지 않는다.
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+local-poststart.sh
+*.bak.*

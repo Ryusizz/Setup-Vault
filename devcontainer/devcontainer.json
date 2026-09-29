@@ -1,0 +1,43 @@
+{
+  "name": "devbox",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "dev",
+
+  // docker-compose.yml 의 워크스페이스 마운트 타깃과 일치해야 한다.
+  "workspaceFolder": "/workspaces/project",
+
+  // initializeCommand 는 컨테이너 생성 전 HOST 에서 실행된다.
+  // bind mount 소스(Claude/Codex 상태 + 프로젝트 상태 디렉터리)를 올바른
+  // 타입·소유자로 사전 생성해서 Docker 가 root 소유로 자동 생성하는 것을 막는다.
+  "initializeCommand": "bash .devcontainer/init-host.sh",
+
+  // postCreate 는 1회 실행: 공유 서버에서 호스트 ~/.gitconfig 전달로 남의 git
+  // identity 가 박히는 것을 .env 값으로 덮어써 방어.
+  "postCreateCommand": "bash -c 'if [ -n \"${GIT_USER_NAME:-}\" ]; then git config --global user.name \"$GIT_USER_NAME\"; git config --global user.email \"${GIT_USER_EMAIL:-}\"; fi'",
+
+  // postStart 는 매 시작마다: (1) 상태 마운트 방어적 chown, (2) sshd 시작
+  // (network_mode: host 로 파생하면 이 줄은 뺄 것 — 호스트 22번과 충돌),
+  // (3) override 로 ~/.ssh 가 마운트돼 있으면 authorized_keys 씨딩,
+  // (4) 개인용 gitignored 훅(local-poststart.sh)이 있으면 실행 — 없는 사람은
+  // no-op 이라 개인 설정이 공유 파일로 새지 않는다.
+  "postStartCommand": "bash -c 'sudo chown -R dev:dev /home/dev/.claude /home/dev/.claude.json /home/dev/.codex 2>/dev/null || true; sudo service ssh start || true; if [ -f /home/dev/.ssh-host/authorized_keys ] && [ ! -f /home/dev/.ssh/authorized_keys ]; then cp /home/dev/.ssh-host/authorized_keys /home/dev/.ssh/authorized_keys && chmod 600 /home/dev/.ssh/authorized_keys; fi; [ -f /workspaces/project/.devcontainer/local-poststart.sh ] && bash /workspaces/project/.devcontainer/local-poststart.sh || true'",
+
+  "remoteUser": "dev",
+  "shutdownAction": "none",
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.profiles.linux": {
+          "zsh": { "path": "zsh" }
+        },
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter",
+        "njpwerner.autodocstring"
+      ]
+    }
+  }
+}

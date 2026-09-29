@@ -1,0 +1,30 @@
+# 개인용 compose override 예시 — 쓰려면 docker-compose.override.yml 로 복사
+# (gitignored, 추적 금지).
+#
+# 호스트 계정의 ~/.ssh 를 컨테이너에 read-only 로 마운트한다. Dockerfile 이 이미
+# github.com 을 /home/dev/.ssh-host/id_ed25519 로 가리키는 ~/.ssh/config 를 써
+# 두므로, 이 마운트가 그 나머지 반쪽이다.
+#
+# 얻는 것:
+#   - 컨테이너 안에서 git over ssh (github/gitlab) 가 설계대로 동작
+#   - ~/.ssh/authorized_keys 가 따라 들어와 postStart 가 sshd 접속용으로 씨딩
+#
+# 트레이드오프를 분명히 적어 둔다: :ro 는 쓰기만 막지 읽기는 못 막는다. 컨테이너의
+# 모든 프로세스 — 여기서 도는 코딩 에이전트 포함 — 가 개인키를 읽고 쓸 수 있다.
+# devcontainer 관례상 수용되는 선택이지만, 선택은 선택이다. 대안은 agent
+# forwarding(사용 가능하나 읽기 불가) 또는 컨테이너 전용 키 등록.
+#
+# compose 는 docker-compose.yml 옆의 이 파일을 자동으로 로드한다. bind mount
+# 추가는 컨테이너 recreate 가 필요하다:
+#
+#   cd <repo>/.devcontainer && docker compose up -d
+#
+# NOTE: recreate 는 그 컨테이너에 붙어 있던 모든 셸을 끊는다.
+#
+# compose 는 volumes 를 컨테이너 경로 기준으로 병합하므로, 아래는 베이스 목록을
+# 대체하지 않고 덧붙인다.
+
+services:
+  dev:
+    volumes:
+      - ${HOME}/.ssh:/home/dev/.ssh-host:ro
