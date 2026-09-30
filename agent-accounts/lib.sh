@@ -209,12 +209,21 @@ aa_sync_overlay() {
   done < <(find "$shared" -mindepth 1 -maxdepth 1 2>/dev/null)
 
   # 2. overlay -> shared: promote real entries the CLI created here, drop
-  #    symlinks whose target disappeared.
+  #    symlinks whose target disappeared or that point at now-private state.
   while IFS= read -r path; do
     name="$(basename "$path")"
     if [ -L "$path" ]; then
       # drop dangling links, and any link to a transient sqlite sidecar
-      if [ ! -e "$path" ] || aa_is_transient "$name"; then rm -f "$path"; fi
+      if [ ! -e "$path" ] || aa_is_transient "$name"; then rm -f "$path"; continue; fi
+      # Self-heal a name that has since joined the private list: an earlier
+      # sync linked it into the shared store, and step 1 now skips it forever,
+      # so the stale link would survive the fix that made it private. Drop it
+      # (the shared target is untouched) and let the CLI recreate it here —
+      # that is what unbroke codex's app-server-daemon/ socket dirs.
+      if _aa_in_list "$name" "${private[@]}"; then
+        rm -f "$path"
+        [ -n "$quiet" ] || aa_msg "'$name' is account-private now; dropped the shared symlink so $tool recreates it locally"
+      fi
       continue
     fi
     _aa_in_list "$name" "${AA_SKIP[@]}" && continue
