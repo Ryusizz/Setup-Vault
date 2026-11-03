@@ -88,6 +88,11 @@ if [ -z "$account" ]; then
       "$AA_REAL" ${args+"${args[@]}"}
     exit $?
   fi
+  # Entering the default account interactively counts as entering it: check
+  # whether another account is busy. (`claude` alone must stay otherwise untouched.)
+  if [ "$AA_TOOL" = claude ]; then
+    aa_takeover_guard "${CLAUDE_CONFIG_DIR:-$AA_CLAUDE_SHARED}" ${args+"${args[@]}"} || exit 1
+  fi
   exec "$AA_REAL" ${args+"${args[@]}"}
 fi
 
@@ -172,5 +177,7 @@ if [ "$is_login_flow" -eq 1 ]; then
   aa_with_creds_guard "$AA_TOOL" "$store" "$AA_REAL" ${args+"${args[@]}"}
   exit $?
 fi
+
+[ "$AA_TOOL" != claude ] || aa_takeover_guard "$store" ${args+"${args[@]}"} || exit 1
 
 exec "$AA_REAL" ${args+"${args[@]}"}

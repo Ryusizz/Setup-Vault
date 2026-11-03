@@ -5,7 +5,8 @@
 #   bash agent-accounts/test/run.sh
 #
 # Covers: owner routing in the wrapper, the merged `agent-acct agents` list,
-# `agent-acct handoff` (incl. the double-writer guards) and `doctor`'s job check.
+# `agent-acct handoff` (incl. the double-writer guards), `doctor`'s job check and
+# the entry guard (`claude -u X` while another account is busy).
 set -uo pipefail
 
 # The suite must behave the same whether or not it is started from a terminal.
@@ -19,6 +20,9 @@ T="$(mktemp -d)"
 cleanup() {
   [ -f "$T/sleeper.pid" ] && kill "$(cat "$T/sleeper.pid")" 2>/dev/null
   [ -f "$T/zparent.pid" ] && kill "$(cat "$T/zparent.pid")" 2>/dev/null
+  if [ -f "$T/spawned.pids" ]; then
+    while read -r p; do kill -KILL "$p" 2>/dev/null; done < "$T/spawned.pids"
+  fi
   rm -rf "$T"
 }
 trap cleanup EXIT
@@ -40,7 +44,8 @@ export AGENT_ACCT_CLAUDE_HOME="$T/claude" AGENT_ACCT_CODEX_HOME="$T/codex"
 export AGENT_ACCT_REGISTRY="$T/claude/.accounts/registry.json"
 export AGENT_ACCT_REAL_CLAUDE="$T/fake/claude"
 export FAKE_LOG="$T/fake.log" FAKE_FIXTURES="$T/fixtures" FAKE_SLEEPER_PID="$T/sleeper.pid"
-unset CLAUDE_CONFIG_DIR AGENT_ACCT_ACTIVE AGENT_ACCT_NO_ROUTE AGENT_ACCT_DEBUG AGENT_ACCT_FORCE_INTERACTIVE
+unset CLAUDE_CONFIG_DIR AGENT_ACCT_ACTIVE AGENT_ACCT_NO_ROUTE AGENT_ACCT_DEBUG AGENT_ACCT_FORCE_INTERACTIVE \
+      AGENT_ACCT_ALLOW_MIXED AGENT_ACCT_TAKEOVER AGENT_ACCT_TERM_WAIT CLAUDE_CODE_SESSION_ID
 S="$T/claude"
 mkdir -p "$S/sessions" "$S/.accounts/beta" "$S/.accounts/gamma" "$T/work/alpha" "$T/fake" "$T/fixtures"
 : > "$FAKE_LOG"
@@ -93,7 +98,9 @@ line="$(printf 'CFG=%s ACTIVE=%s CWD=%s ARGS=%s' "${CLAUDE_CONFIG_DIR-}" "${AGEN
 printf '%s\n' "$line" >> "$FAKE_LOG"
 case "${1-}" in
   agents) cat "$FAKE_FIXTURES/agents-${AGENT_ACCT_ACTIVE:-alpha}.json" ;;
-  stop)   printf '%s\n' "$line"; [ -f "$FAKE_SLEEPER_PID" ] && kill "$(cat "$FAKE_SLEEPER_PID")" 2>/dev/null ;;
+  stop)   printf '%s\n' "$line"
+          if [ -f "$FAKE_FIXTURES/stop-${2-}.pid" ]; then kill -KILL "$(cat "$FAKE_FIXTURES/stop-$2.pid")" 2>/dev/null
+          elif [ -f "$FAKE_SLEEPER_PID" ]; then kill "$(cat "$FAKE_SLEEPER_PID")" 2>/dev/null; fi ;;
   *)      printf '%s\n' "$line" ;;
 esac
 EOF
@@ -235,6 +242,206 @@ zero  "running job with --stop" "$rc"
 has   "  ...stops it on its own account first" "$(grep -e 'ARGS=stop aaaa2222' "$FAKE_LOG")" "ACTIVE=alpha"
 has   "  ...then resumes it as a same-ID continuation" "$(last_call)" "--bg --resume $(sid aaaa2222)"
 hasnt "  ...not as a fork" "$(last_call)" "--fork-session"
+
+# --------------------------------------------------------------------------- #
+echo "entry guard: claude -u X while another account is busy"
+# Real processes (sleep) that look like sessions of an account: the account is read
+# from the process's CLAUDE_CONFIG_DIR, exactly as the guard does for the real CLI.
+SPN=0
+alive() { local st; st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1; st="${st##*) }"; [ "${st:0:1}" != Z ]; }
+gone_soon() { local i; for i in $(seq 1 60); do alive "$1" || return 0; sleep 0.1; done; return 1; }
+spawn() { # <CLAUDE_CONFIG_DIR or ""> <kind> <status> <name> [jobId] [stubborn|spare|reused]
+  local cfg="$1" kind="$2" status="$3" name="$4" jobid="${5-}" mode="${6-}" pf="$T/spawn.pid" body extra="" st rest f start i
+  rm -f "$pf"
+  if [ "$mode" = stubborn ]; then body='trap "" TERM; echo $$ > "$1"; while :; do sleep 1; done'
+  else body='echo $$ > "$1"; exec sleep 600'; fi
+  if [ -n "$cfg" ]; then ( export CLAUDE_CONFIG_DIR="$cfg"; bash -c "$body" _ "$pf" </dev/null >/dev/null 2>&1 & )
+  else ( bash -c "$body" _ "$pf" </dev/null >/dev/null 2>&1 & ); fi
+  for i in $(seq 1 60); do [ -s "$pf" ] && break; sleep 0.05; done
+  SP_PID="$(cat "$pf")"; echo "$SP_PID" >> "$T/spawned.pids"
+  st="$(cat "/proc/$SP_PID/stat")"; rest="${st##*) }"; read -r -a f <<< "$rest"; start="${f[19]}"
+  [ "$mode" = spare ] && extra=',"spare":true'
+  [ "$mode" = reused ] && start=1
+  SPN=$((SPN + 1)); SP_SID="$(printf 'sp%06d-0000-4000-8000-000000000000' "$SPN")"
+  printf '{"pid":%s,"sessionId":"%s","procStart":"%s","kind":"%s","status":"%s","name":"%s","jobId":"%s"%s}\n' \
+    "$SP_PID" "$SP_SID" "$start" "$kind" "$status" "$name" "$jobid" "$extra" > "$S/sessions/$SP_PID.json"
+}
+unspawn() { kill -KILL "$1" 2>/dev/null; rm -f "$S/sessions/$1.json"; }
+launched() { case "$1" in *"CFG=$2 ACTIVE=$3 "*) return 0 ;; *) return 1 ;; esac; }
+ENTER() { AGENT_ACCT_FORCE_INTERACTIVE=1 "$CLAUDE" "$@" 2>&1; }   # reads the menu answers from stdin
+BETA="$S/.accounts/beta"
+
+# -- what counts as "running elsewhere" -------------------------------------
+spawn "$BETA" interactive busy "own account";                OWN=$SP_PID
+spawn "" interactive idle "idle elsewhere";                  IDLE=$SP_PID
+spawn "" interactive busy "spare" "" spare;                  SPARE=$SP_PID
+spawn "" interactive busy "pid reused" "" reused;            REUSED=$SP_PID
+spawn "$T/not-an-account" interactive busy "unmanaged dir";  OTHER=$SP_PID
+out="$(printf '3\n' | ENTER -u beta)"; rc=$?
+zero  "nothing busy elsewhere (own account, idle, spare, reused pid, unknown dir): no question" "$rc"
+hasnt "  ...silently" "$out" "작업 중인 세션"
+launched "$out" "$BETA" beta && t_ok "  ...and claude starts as beta" || t_bad "  ...and claude starts as beta" "$out"
+for p in $OWN $IDLE $SPARE $REUSED $OTHER; do unspawn "$p"; done
+
+# -- the menu -------------------------------------------------------------
+spawn "" interactive busy "alpha busy chat";                 X=$SP_PID
+out="$(printf '1\n' | ENTER -u beta)"; rc=$?
+zero  "busy session in another account, answer 1 (enter anyway)" "$rc"
+has   "  ...names the account being entered" "$out" "지금 들어가려는 계정: beta"
+has   "  ...lists the session with its account" "$out" "alpha"
+has   "  ...and its name" "$out" "alpha busy chat"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+alive "$X" && t_ok "  ...and the other session is left running" || t_bad "  ...and the other session is left running"
+
+for answer in 3 ""; do
+  out="$(printf '%s\n' "$answer" | ENTER -u beta)"; rc=$?
+  nonzero "answer '${answer:-Enter}' cancels" "$rc"
+  has   "  ...says so" "$out" "취소했습니다"
+  launched "$out" "$BETA" beta && t_bad "  ...claude does not start" "$out" || t_ok "  ...claude does not start"
+  alive "$X" && t_ok "  ...and the other session is left running" || t_bad "  ...and the other session is left running"
+done
+out="$(ENTER -u beta </dev/null)"; rc=$?
+nonzero "end of input cancels" "$rc"
+alive "$X" && t_ok "  ...and the other session is left running" || t_bad "  ...and the other session is left running"
+out="$(printf 'x\n' | ENTER -u beta)"; rc=$?
+nonzero "an unknown answer cancels" "$rc"
+
+out="$(printf '2\n' | ENTER -u beta)"; rc=$?
+zero  "answer 2 (stop them and enter)" "$rc"
+has   "  ...reports it" "$out" "1개를 끊었습니다"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+gone_soon "$X" && t_ok "  ...the other session is gone" || t_bad "  ...the other session is gone"
+unspawn "$X"
+
+# -- background job: ended through `claude stop`, on its own account -----------
+spawn "" bg busy "alpha bg job" bgjob9999 stubborn;          X=$SP_PID
+printf '%s\n' "$X" > "$T/fixtures/stop-bgjob9999.pid"
+out="$(printf '2\n' | ENTER -u beta)"; rc=$?
+zero  "bg session (ignores SIGTERM) is stopped" "$rc"
+has   "  ...with 'claude stop <job>' as its own account" "$out" "ACTIVE=alpha CWD="
+has   "  ...naming the job" "$out" "ARGS=stop bgjob9999"
+gone_soon "$X" && t_ok "  ...and it is gone" || t_bad "  ...and it is gone"
+rm -f "$T/fixtures/stop-bgjob9999.pid"; unspawn "$X"
+
+# -- never touches itself ------------------------------------------------------
+# The caller is a registered, busy session of another account (alpha) that runs the
+# wrapper as its child -- what happens when a claude session's Bash tool runs
+# `claude -u beta`. (A real parent: the test shell's own environ is not ours to rely on.)
+rm -f "$T/go" "$T/anc.pid" "$T/anc.out" "$T/anc.out.rc"
+( printf '3\n' | AGENT_ACCT_FORCE_INTERACTIVE=1 bash -c \
+    'echo $$ > "$1"; while [ ! -f "$2" ]; do sleep 0.05; done; "$3" -u beta > "$4" 2>&1; echo $? > "$4.rc"' \
+    _ "$T/anc.pid" "$T/go" "$CLAUDE" "$T/anc.out" >/dev/null 2>&1 & )
+for i in $(seq 1 60); do [ -s "$T/anc.pid" ] && break; sleep 0.05; done
+ANC="$(cat "$T/anc.pid")"; echo "$ANC" >> "$T/spawned.pids"
+st="$(cat "/proc/$ANC/stat")"; rest="${st##*) }"; read -r -a f <<< "$rest"
+printf '{"pid":%s,"sessionId":"%s","procStart":"%s","kind":"interactive","status":"busy","name":"the caller"}\n' \
+  "$ANC" "selfsess-0000-4000-8000-000000000000" "${f[19]}" > "$S/sessions/$ANC.json"
+: > "$T/go"
+for i in $(seq 1 100); do [ -s "$T/anc.out.rc" ] && break; sleep 0.1; done
+out="$(cat "$T/anc.out" 2>/dev/null)"; rc="$(cat "$T/anc.out.rc" 2>/dev/null)"
+eq    "a busy session that is an ancestor of the wrapper is not offered" "$rc" "0"
+hasnt "  ...no question" "$out" "작업 중인 세션"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+unspawn "$ANC"
+
+spawn "" interactive busy "my own session";                  X=$SP_PID
+out="$(printf '3\n' | CLAUDE_CODE_SESSION_ID="$SP_SID" ENTER -u beta)"; rc=$?
+zero  "the session named by CLAUDE_CODE_SESSION_ID is not offered" "$rc"
+hasnt "  ...no question" "$out" "작업 중인 세션"
+
+# -- without a person to ask ---------------------------------------------------
+out="$("$CLAUDE" -u beta 2>&1 </dev/null)"; rc=$?
+zero  "no terminal: the guard stays out of the way" "$rc"
+hasnt "  ...no question" "$out" "작업 중인 세션"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+alive "$X" && t_ok "  ...and nothing is stopped" || t_bad "  ...and nothing is stopped"
+
+out="$(AGENT_ACCT_TAKEOVER=stop "$CLAUDE" -u beta 2>&1 </dev/null)"; rc=$?
+zero  "AGENT_ACCT_TAKEOVER=stop works without a terminal" "$rc"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+gone_soon "$X" && t_ok "  ...and stops the other session" || t_bad "  ...and stops the other session"
+unspawn "$X"
+
+# -- a session that will not stop ----------------------------------------------
+spawn "" interactive busy "stubborn chat" "" stubborn;       X=$SP_PID
+export AGENT_ACCT_TERM_WAIT=1
+out="$(printf '2\nn\nn\n' | ENTER -u beta)"; rc=$?
+nonzero "won't stop; no SIGKILL, don't enter anyway -> cancel" "$rc"
+has   "  ...offers SIGKILL" "$out" "강제 종료"
+has   "  ...says how many are left" "$out" "끊지 못한 세션이 1개"
+alive "$X" && t_ok "  ...and it is still running" || t_bad "  ...and it is still running"
+launched "$out" "$BETA" beta && t_bad "  ...claude does not start" "$out" || t_ok "  ...claude does not start"
+
+out="$(printf '2\nn\ny\n' | ENTER -u beta)"; rc=$?
+zero  "won't stop; no SIGKILL, enter anyway" "$rc"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+alive "$X" && t_ok "  ...and it is still running" || t_bad "  ...and it is still running"
+
+out="$(printf '2\ny\n' | ENTER -u beta)"; rc=$?
+zero  "won't stop; SIGKILL" "$rc"
+launched "$out" "$BETA" beta && t_ok "  ...claude starts as beta" || t_bad "  ...claude starts as beta" "$out"
+gone_soon "$X" && t_ok "  ...and it is gone" || t_bad "  ...and it is gone"
+unset AGENT_ACCT_TERM_WAIT
+unspawn "$X"
+
+# -- which starts are guarded --------------------------------------------------
+spawn "" interactive busy "alpha busy chat";                 X=$SP_PID
+for cmd in "-p hi" "--print hi" "--bg task" "--version" "--help" "logs zzzzzzzz" "agents" "mcp list" "doctor" "stop zzzzzzzz"; do
+  out="$(printf '3\n' | ENTER -u beta $cmd)"; rc=$?
+  hasnt "not an interactive start, no question: claude -u beta $cmd" "$out" "작업 중인 세션"
+done
+out="$(printf '3\n' | AGENT_ACCT_ALLOW_MIXED=1 ENTER -u beta)"; rc=$?
+zero  "AGENT_ACCT_ALLOW_MIXED=1 skips the guard" "$rc"
+hasnt "  ...no question" "$out" "작업 중인 세션"
+for cmd in "fix the bug" "--resume abc" "--continue" "attach somejob"; do
+  out="$(printf '3\n' | ENTER -u beta $cmd)"; rc=$?
+  has   "interactive start asks: claude -u beta $cmd" "$out" "작업 중인 세션"
+done
+unspawn "$X"
+
+# -- bare `claude` is an entry into the default account too ---------------------
+spawn "$BETA" interactive busy "beta busy chat";             X=$SP_PID
+out="$(printf '3\n' | ENTER)"; rc=$?
+nonzero "bare claude: busy session in another account -> asks (cancel)" "$rc"
+has   "  ...names the default account" "$out" "지금 들어가려는 계정: alpha"
+has   "  ...and the busy one" "$out" "beta busy chat"
+out="$(printf '1\n' | ENTER)"; rc=$?
+zero  "bare claude, answer 1" "$rc"
+has   "  ...runs the real CLI untouched" "$out" "CFG= ACTIVE= "
+out="$(printf '3\n' | ENTER -p hi)"; rc=$?
+hasnt "bare claude -p: no question" "$out" "작업 중인 세션"
+out="$(printf '3\n' | ENTER -u alpha)"; rc=$?
+has   "claude -u alpha (the default account, by name) asks as well" "$out" "지금 들어가려는 계정: alpha"
+unspawn "$X"
+spawn "" interactive busy "alpha busy chat";                 X=$SP_PID
+out="$(printf '3\n' | ENTER)"; rc=$?
+zero  "bare claude with only the default account busy: no question" "$rc"
+unspawn "$X"
+
+# -- a check that cannot run must not lock anyone out ------------------------------
+printf '{broken' > "$T/bad-registry.json"
+out="$(AGENT_ACCT_REGISTRY="$T/bad-registry.json" python3 "$AA/jobs.py" takeover --store "$S" 2>&1 </dev/null)"; rc=$?
+zero  "the check itself failing: warn and let the start go ahead" "$rc"
+has   "  ...says it was skipped" "$out" "건너뜁니다"
+out="$(AGENT_ACCT_DEBUG=1 AGENT_ACCT_REGISTRY="$T/bad-registry.json" python3 "$AA/jobs.py" takeover --store "$S" 2>&1 </dev/null)"; rc=$?
+nonzero "  ...with AGENT_ACCT_DEBUG=1 the error is shown instead" "$rc"
+out="$(python3 "$AA/jobs.py" takeover --store "$T/not-an-account" 2>&1 </dev/null)"; rc=$?
+zero  "a store that is not a managed account: nothing to compare, go ahead" "$rc"
+
+# -- agent-acct running ----------------------------------------------------------
+spawn "" interactive busy "alpha chat";                      A=$SP_PID
+spawn "$BETA" bg waiting "beta bg" bgjob1234;                B=$SP_PID
+out="$("$ACCT" running 2>&1)"; rc=$?
+zero  "agent-acct running" "$rc"
+has   "  ...lists the default account's session" "$out" "alpha"
+has   "  ...and the other account's, with its job id" "$out" "bgjob1234"
+eq    "  ...--json is one row per live session, with the account" \
+      "$("$ACCT" running --json | python3 -c 'import json,sys; print(sorted((r["account"], r["pid"]) for r in json.load(sys.stdin) if r["pid"] in ('"$A,$B"')))')" \
+      "[('alpha', $A), ('beta', $B)]"
+out="$("$ACCT" running --account beta 2>&1)"
+has   "  ...--account narrows" "$out" "beta bg"
+hasnt "  ...(the other account is gone)" "$out" "alpha chat"
+unspawn "$A"; unspawn "$B"
 
 # --------------------------------------------------------------------------- #
 echo "consistency with lib.sh"

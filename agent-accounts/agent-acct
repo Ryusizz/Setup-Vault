@@ -39,6 +39,8 @@ agent-acct — claude / codex 다중 계정 관리
                     [--to <계정>] [--from <계정>] [--stop | --fork]
                     [--yes] [--dry-run] [-- <claude 인자…>]
                                         <id> 를 생략하면 목록에서 번호로 고릅니다
+  agent-acct running [--json]           지금 돌아가는 모든 세션과 그 계정 (대화형 포함)
+                    [--account <id>]    claude -u X 로 들어갈 때 이 목록으로 혼성 사용을 확인
 
   tool = claude | codex   (생략 시 둘 다)
 
@@ -256,6 +258,7 @@ cmd_doctor() {
 # agents / handoff: cross-account view of the (per-account) background jobs
 cmd_agents()  { python3 "$AA_JOBS_PY" agents "$@"; }
 cmd_handoff() { python3 "$AA_JOBS_PY" handoff "$@"; }
+cmd_running() { python3 "$AA_JOBS_PY" running "$@"; }
 
 [ $# -ge 1 ] || usage
 sub="$1"; shift
@@ -275,6 +278,7 @@ case "$sub" in
   doctor)      cmd_doctor "$@" ;;
   agents)      cmd_agents "$@" ;;
   handoff)     cmd_handoff "$@" ;;
+  running)     cmd_running "$@" ;;
   dump)        aa_reg dump ;;
   -h|--help|help) usage ;;
   *) aa_err "알 수 없는 명령: $sub"; usage ;;

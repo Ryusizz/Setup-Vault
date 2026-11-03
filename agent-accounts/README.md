@@ -184,6 +184,8 @@ agent-acct agents [--all] [--json] [--account <id>]
                                    모든 계정의 claude 백그라운드 에이전트 목록
 agent-acct handoff [<id|이름>] [--to <계정>] [--stop|--fork] [--yes] [--dry-run]
                                    잡의 대화를 다른 계정으로 넘겨 이어받기
+agent-acct running [--json] [--account <id>]
+                                   지금 돌아가는 모든 세션(대화형 포함)과 그 계정
 ```
 
 ## Codex 세션의 남은 writer 종료
@@ -214,7 +216,7 @@ codex-unlock --yes --force 01a0855a-f821-7503-83e1-905ce7ae2782
 `jobs/`** 만 봅니다. 위 표처럼 `daemon*` 와 `jobs/` 는 일부러 계정별로 분리돼 있어서
 (공유하면 잡이 먼저 데몬을 띄운 계정의 할당량으로 돕니다) `claude -u surro1 agents`
 와 `claude -u surro2 agents` 는 서로 다른 목록을 보여줍니다. 이 분리는 그대로 두고,
-그 위에 세 가지를 얹었습니다.
+그 위에 네 가지를 얹었습니다.
 
 ### 1. 한 표로 보기 — `agent-acct agents`
 
@@ -295,12 +297,60 @@ $ agent-acct handoff c7d2bfef --to surro2 --stop --yes     # 바로 실행
 `agent-acct doctor` 는 계정별 잡 수와 함께 `daemon`/`jobs` 가 심볼릭 링크로 바뀌어
 격리가 깨졌는지, 로그인이 없는 계정에 잡이 갇혀 있는지를 점검합니다.
 
+### 4. 들어갈 때 확인하기 — 진입 가드
+
+`claude -u X`(또는 `-u` 없는 `claude`)로 **대화형으로 들어갈 때**, 다른 계정에서 작업
+중(`busy`)이거나 내 답을 기다리는(`waiting`) 세션이 있으면 알려주고, 끊고 들어갈지
+묻습니다. 두 계정 사용량이 동시에 돌아가는 혼성 사용을 진입 시점에 막기 위한 장치입니다.
+
+```
+[agent-acct] surro1 에서 작업 중인 세션이 2개 있습니다 (지금 들어가려는 계정: surro2):
+ACCOUNT  KIND         STATUS   NAME                     PID     JOB
+-------  -----------  -------  -----------------------  ------  --------
+surro1   bg           waiting  nightly data cleanup     280140  d59e7ac0
+surro1   interactive  busy     refactor auth module     514756  -
+  [1] 그대로 들어가기   [2] 위 세션을 끊고 들어가기   [3] 취소
+선택 [3]:
+```
+
+Enter 나 그 밖의 입력은 취소입니다. 확인하려면 `agent-acct running` 으로 같은 목록(계정
+판정 포함, `idle` 도 포함)을 미리 볼 수 있습니다.
+
+- **묻는 경우.** 대화형 시작만 해당합니다. `-p/--print`, `--bg`, `-h`, `-v` 와 관리
+  서브커맨드(`agents`, `logs`, `stop`, `mcp`, `doctor` …)는 묻지 않습니다. `attach` 는
+  터미널을 가져가므로 묻습니다. 터미널(tty)이 없으면(파이프·스크립트·cron) 묻지 않고
+  그대로 진행합니다.
+- **목록에 드는 세션.** 다른 계정의 `busy`/`waiting` 만입니다. `idle`, 풀의 예비
+  worker(`spare`), 이미 죽은 프로세스(pid 재사용·좀비 포함)는 뺍니다. 세션이 어느
+  계정인지는 프로세스의 `CLAUDE_CONFIG_DIR` 로 판정하고(없으면 기본 계정), 판정할 수
+  없으면 건드리지 않습니다.
+- **끊는 방식.** 백그라운드 잡은 소유 계정에서 `claude stop <id>` 로 멈춥니다(대화는
+  보존되어 `attach` 나 `handoff` 로 이어갈 수 있습니다). 대화형 세션은 `SIGTERM` 을
+  보냅니다. 실제 CLI(2.1.316)는 이걸 받아 정상 종료(exit 143)하고 자기 `sessions/` 등록도
+  스스로 지우는 것을 확인했습니다. 대화는 `projects/*.jsonl` 에 남아 `--resume` 으로
+  이어갈 수 있지만, **진행 중이던 응답과 도구 실행은 중단됩니다.** 8초
+  (`AGENT_ACCT_TERM_WAIT`, 백그라운드 잡의 `stop` 은 최소 15초) 뒤에도 남아 있으면
+  `SIGKILL` 할지 다시 묻고(기본 N), 끊지 못한 세션이 있으면 "그래도 들어갈까요?" 를
+  묻습니다.
+- **자기 자신은 끊지 않습니다.** 래퍼의 조상 프로세스(예: claude 세션의 Bash 도구에서
+  `claude -u X` 를 친 경우의 그 세션)와 `CLAUDE_CODE_SESSION_ID` 의 세션은 목록에서
+  뺍니다.
+- **환경변수.** `AGENT_ACCT_ALLOW_MIXED=1` 은 가드를 끕니다(이 도구가 내부에서
+  `claude -u …` 를 부를 때도 이걸 설정합니다). `AGENT_ACCT_TAKEOVER=stop` 은 묻지 않고
+  끊고 들어갑니다 — 자동화용이므로 신중히 쓰세요. 확인 자체가 실패하면 경고만 하고 그대로
+  진행합니다(`AGENT_ACCT_DEBUG=1` 이면 오류를 그대로 보입니다).
+- **한계.** 래퍼를 거치지 않는 시작(VS Code 확장, 실제 바이너리 직접 실행)은 이 가드를
+  타지 않습니다. 확인한 뒤 시작하기까지의 짧은 틈에 다른 계정이 일을 시작하면 놓칩니다.
+  같은 계정끼리는 대상이 아니고, `idle` 세션은 그대로 둡니다.
+
 ## 알아둘 점
 
 - **옵션 없이 실행하면 지금까지와 동일**합니다. 환경변수를 건드리지 않으므로
-  VS Code 확장이나 다른 스크립트가 CLI 를 직접 불러도 안전합니다. 유일한 예외는 위의
-  자동 라우팅으로, `attach`/`logs`/`stop`/`rm`/`respawn <id>` 가 *원래라면
-  "No job matching" 으로 실패했을* 때만 소유 계정으로 바꿉니다.
+  VS Code 확장이나 다른 스크립트가 CLI 를 직접 불러도 안전합니다. 예외는 둘입니다.
+  자동 라우팅은 `attach`/`logs`/`stop`/`rm`/`respawn <id>` 가 *원래라면 "No job
+  matching" 으로 실패했을* 때만 소유 계정으로 바꿉니다. 진입 가드는 **터미널에서
+  대화형으로 들어갈 때**, 다른 계정이 작업 중이면 한 번 묻습니다(`-p`·`--bg`·스크립트
+  실행은 묻지 않고, `AGENT_ACCT_ALLOW_MIXED=1` 로 끌 수 있습니다).
 - `adopt` 로 편입한 계정은 `mode=native` — 저장소가 `~/.claude`, `~/.codex` 자체입니다.
   CLI 당 native 계정은 하나뿐이고, 나머지는 오버레이를 씁니다.
 - `--resume` 는 계정과 무관하게 전체 세션을 보여줍니다. 반면 `-c/--continue` 가

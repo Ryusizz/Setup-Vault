@@ -348,6 +348,41 @@ aa_route_job() {
 }
 
 # --------------------------------------------------------------------------- #
+# Entry guard: starting an interactive claude as one account while another
+# account has sessions busy (or waiting on you) means two accounts' usage is
+# in play at once. Say so, and offer to stop the others first.
+# --------------------------------------------------------------------------- #
+
+# aa_is_interactive_start <claude args...> -> 0 when this call opens the TUI.
+# One-shot output (-p), background launches, help/version and the management
+# subcommands never do; `attach` does (it takes over the terminal).
+aa_is_interactive_start() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --) break ;;
+      -p|--print|--bg|--background|-h|--help|-v|--version) return 1 ;;
+    esac
+  done
+  case "${1-}" in
+    attach) return 0 ;;
+    agents|auth|auto-mode|doctor|gateway|import|install|logs|mcp|plugin|plugins|purge|respawn|rm|setup-token|stop|kill|ultrareview|update|upgrade) return 1 ;;
+  esac
+  return 0
+}
+
+# aa_takeover_guard <store the CLI is about to run on> <claude args...>
+# Returns non-zero only when the user chose to cancel. Any failure of the check
+# itself lets the start go ahead (jobs.py reports that and exits 0).
+# AGENT_ACCT_ALLOW_MIXED=1 skips it; AGENT_ACCT_TAKEOVER=stop answers "stop them".
+aa_takeover_guard() {
+  local store="$1"; shift
+  [ -z "${AGENT_ACCT_ALLOW_MIXED:-}" ] || return 0
+  aa_is_interactive_start "$@" || return 0
+  python3 "$AA_JOBS_PY" takeover --store "$store"
+}
+
+# --------------------------------------------------------------------------- #
 # Locating the real CLI (the wrapper shadows it on PATH)
 # --------------------------------------------------------------------------- #
 aa_real_bin() {

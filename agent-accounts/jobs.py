@@ -11,6 +11,8 @@ jobs of the account they run as.  This helper reads across all account stores.
   agents   [--json] [--all]      one merged list of every account's jobs
   handoff  [<ref>] [--to ACCT]   continue a job's conversation as another account
   live     <session-id>          is a process running that session?
+  running  [--json]              every live session, with the account it runs as
+  takeover --store DIR           entering an account: other accounts busy? stop them?
   summary                        per-account job counts + isolation checks
 
 Account stores come from the registry (same rule as aa_store_dir in lib.sh: the
@@ -24,6 +26,7 @@ import argparse
 import glob
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -247,11 +250,83 @@ def live_sessions(stores):
 
 
 # --------------------------------------------------------------------------- #
+# who is running where
+# --------------------------------------------------------------------------- #
+# Busy = working, waiting = blocked on you.  An idle worker uses nothing, so it
+# is not "running" for the purpose of keeping accounts apart.
+ACTIVE = ("busy", "waiting")
+
+
+def proc_ppid(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return int(fh.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def ancestor_pids(pid=None):
+    """This process and everything above it: never something to stop."""
+    seen, pid = set(), pid or os.getpid()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        pid = proc_ppid(pid)
+    return seen
+
+
+def account_of_pid(pid, store_map, default):
+    """The account a running claude belongs to, from the environment the wrapper
+    gave it: CLAUDE_CONFIG_DIR names its store, none at all means the default
+    (native) account.  None when it cannot be told (not ours, or an unknown dir)."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            env = dict(kv.split(b"=", 1) for kv in fh.read().split(b"\0") if b"=" in kv)
+    except OSError:
+        return None
+    cfg = env.get(b"CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return default
+    return store_map.get(realpath(cfg.decode(errors="replace")))
+
+
+def running_sessions(stores):
+    """Live claude sessions and the account each runs as (pool spares excluded)."""
+    store_map = {realpath(p): a for a, p in stores}
+    default = registry.native_holder(registry.load(), "claude")
+    dirs = {realpath(os.path.join(p, "sessions")) for _, p in stores}
+    dirs.add(realpath(os.path.join(shared_dir(), "sessions")))
+    out = []
+    for d in sorted(dirs):
+        for path in sorted(glob.glob(os.path.join(d, "*.json"))):
+            info = read_json(path) or {}
+            pid = info.get("pid")
+            if not pid or info.get("spare") or not pid_alive(pid, info.get("procStart")):
+                continue
+            acct = account_of_pid(pid, store_map, default)
+            if acct:
+                out.append({"account": acct, "pid": pid, "kind": info.get("kind") or "?",
+                            "status": info.get("status") or "-", "name": info.get("name") or "",
+                            "jobId": info.get("jobId") or "", "sessionId": info.get("sessionId") or "",
+                            "procStart": info.get("procStart")})
+    return out
+
+
+def session_table(rows, numbered=False):
+    out = [(["#"] if numbered else []) + ["ACCOUNT", "KIND", "STATUS", "NAME", "PID", "JOB"]]
+    for n, row in enumerate(rows, 1):
+        out.append((["%d" % n] if numbered else []) +
+                   [row["account"], row["kind"], row["status"], clip(row["name"] or row["jobId"], 40),
+                    str(row["pid"]), row["jobId"] or "-"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # talking to the real CLI through the wrapper
 # --------------------------------------------------------------------------- #
 def run_claude(claude, acct, args, timeout=60, capture=True, cwd=None):
-    # AGENT_ACCT_NO_ROUTE: we already picked the account, never re-route.
-    env = dict(os.environ, AGENT_ACCT_NO_ROUTE="1")
+    # AGENT_ACCT_NO_ROUTE / _ALLOW_MIXED: we already picked the account and know
+    # what is running elsewhere; never re-route and never ask again.
+    env = dict(os.environ, AGENT_ACCT_NO_ROUTE="1", AGENT_ACCT_ALLOW_MIXED="1")
     return subprocess.run([claude, "-u", acct] + args, env=env, cwd=cwd,
                           stdin=subprocess.DEVNULL if capture else None,
                           capture_output=capture, text=True, timeout=timeout)
@@ -503,6 +578,110 @@ def cmd_handoff(a, extra):
     return 0
 
 
+def wait_until(cond, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.2)
+    return cond()
+
+
+def terminate(session, claude, wait, can_ask):
+    """Stop one session; True once its process is gone.
+
+    A background job goes through `claude stop` (clean, keeps the conversation);
+    anything else gets SIGTERM.  If it is still there after `wait` seconds,
+    SIGKILL is only sent when the user says so (same policy as codex-unlock)."""
+    pid, started = session["pid"], session["procStart"]
+
+    def gone():
+        return not pid_alive(pid, started)
+
+    if gone():
+        return True
+    if session["kind"] == "bg" and session["jobId"]:
+        res = run_claude(claude, session["account"], ["stop", session["jobId"]], capture=False)
+        if res.returncode != 0:
+            warn(f"{session['account']} 에서 {session['jobId']} 를 멈추지 못했습니다.")
+            return False
+        wait = max(wait, 15)
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            warn(f"pid {pid}: 종료 권한이 없습니다.")
+            return False
+    if wait_until(gone, wait):
+        return True
+    label = session["name"] or session["jobId"] or session["kind"]
+    if can_ask and ask(f"{session['account']} / {label} (pid {pid}) 가 {wait:g}초 뒤에도 남아 있습니다. "
+                       "강제 종료(SIGKILL)할까요? [y/N] ").lower().startswith("y"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        return wait_until(gone, 5)
+    return False
+
+
+def cmd_takeover(a):
+    """Called by the wrapper before an interactive `claude` starts as the account
+    that owns --store.  If other accounts have sessions that are working or waiting
+    on you, say so and offer to stop them.  Exit 0 = go ahead, 1 = do not start."""
+    stores = account_stores()
+    here = realpath(a.store)
+    target = next((n for n, p in stores if realpath(p) == here), None)
+    if target is None:
+        return 0  # not an account store we manage: nothing to compare against
+    skip, own_session = ancestor_pids(), os.environ.get("CLAUDE_CODE_SESSION_ID")
+    others = [r for r in running_sessions(stores)
+              if r["account"] != target and r["status"] in ACTIVE and r["pid"] not in skip
+              and not (own_session and r["sessionId"] == own_session)]
+    auto = os.environ.get("AGENT_ACCT_TAKEOVER") == "stop"
+    can_ask = interactive()
+    if not others or not (auto or can_ask):
+        return 0  # nothing to flag, or nobody to ask: leave things as they were
+    others.sort(key=lambda r: (r["account"], r["kind"], r["pid"]))
+
+    names = ", ".join(sorted({r["account"] for r in others}))
+    warn(f"{names} 에서 작업 중인 세션이 {len(others)}개 있습니다 (지금 들어가려는 계정: {target}):")
+    render_table(session_table(others))
+    if not auto:
+        print("  [1] 그대로 들어가기   [2] 위 세션을 끊고 들어가기   [3] 취소")
+        choice = ask("선택 [3]: ")
+        if choice == "1":
+            return 0
+        if choice != "2":
+            die("취소했습니다.")
+
+    wait = float(os.environ.get("AGENT_ACCT_TERM_WAIT") or 8)
+    stuck = [r for r in others if not terminate(r, a.claude, wait, can_ask)]
+    if not stuck:
+        msg(f"{len(others)}개를 끊었습니다. {target} 로 들어갑니다.")
+        return 0
+    warn(f"끊지 못한 세션이 {len(stuck)}개 남았습니다.")
+    if not can_ask or not ask("그래도 들어갈까요? [y/N] ").lower().startswith("y"):
+        die("취소했습니다.")
+    return 0
+
+
+def cmd_running(a):
+    rows = running_sessions(account_stores())
+    if a.account:
+        rows = [r for r in rows if r["account"] == resolve_account(a.account)]
+    rows.sort(key=lambda r: (r["account"], r["kind"], r["pid"]))
+    if a.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    elif rows:
+        render_table(session_table(rows))
+    else:
+        msg("실행 중인 세션이 없습니다.")
+    return 0
+
+
 def cmd_live(a):
     pids = live_sessions(account_stores()).get(a.session_id)
     if pids:
@@ -558,6 +737,14 @@ def build_parser():
     lv = sub.add_parser("live")
     lv.add_argument("session_id")
 
+    rn = sub.add_parser("running")
+    rn.add_argument("--json", action="store_true")
+    rn.add_argument("--account")
+
+    tk = sub.add_parser("takeover")
+    tk.add_argument("--store", required=True)
+    tk.add_argument("--claude", default=default_claude)
+
     sub.add_parser("summary")
     return p
 
@@ -578,12 +765,21 @@ def main(argv):
             return cmd_handoff(a, extra)
         if a.cmd == "live":
             return cmd_live(a)
+        if a.cmd == "running":
+            return cmd_running(a)
+        if a.cmd == "takeover":
+            return cmd_takeover(a)
         return cmd_summary(a)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:  # the wrapper must never break `claude` over a lookup
-        if a.cmd == "route" and not os.environ.get("AGENT_ACCT_DEBUG"):
+        if os.environ.get("AGENT_ACCT_DEBUG"):
+            raise
+        if a.cmd == "route":
             return 1
+        if a.cmd == "takeover":
+            warn(f"계정 간 실행 확인에 실패해 건너뜁니다 ({exc!r}). AGENT_ACCT_DEBUG=1 로 자세히 볼 수 있습니다.")
+            return 0
         raise exc
 
 
