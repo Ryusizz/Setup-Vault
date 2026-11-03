@@ -188,6 +188,8 @@ has   "  ...and says what it left behind" "$out" "승계 안 함: --reply-on-res
 has   "  ...warns that the original entry still exists" "$out" "같은 세션이 alpha 에도 항목(aaaa1111)으로 남아 있습니다"
 has   "  ...keeps the job's name (a new job would start nameless)" "$call" "--name alpha idle job"
 has   "  ...and shows it in the plan" "$out" "이름      : alpha idle job"
+hasnt "  ...and by default adds no --settings (the job isolates itself as usual)" "$call" "--settings"
+hasnt "  ...and says nothing about isolation" "$out" "격리"
 
 out="$("$ACCT" handoff aaaa1111 --to beta --yes -- --name mine 2>&1)"; rc=$?
 zero  "a --name given after -- is respected" "$rc"
@@ -202,6 +204,28 @@ zero  "original without a name" "$rc"
 hasnt "  ...gets no empty --name" "$(last_call)" "--name"
 has   "  ...and the plan says why" "$out" "(원본에 이름 없음)"
 mv "$T/fixtures/agents-gamma.json.orig" "$T/fixtures/agents-gamma.json"
+
+# A job set up to edit in place (bgIsolation "none") would have every write refused
+# in its successor, which isolates itself by default -- so the setting goes along.
+sed -i 's/}$/,"bgIsolation":"none"}/' "$S/jobs/aaaa1111/state.json"
+out="$("$ACCT" handoff aaaa1111 --to beta --yes 2>&1)"; rc=$?
+zero  "original set up to work in place" "$rc"
+call="$(last_call)"
+has   "  ...the new job is allowed to edit in place too" "$call" '--settings {"worktree":{"bgIsolation":"none"}}'
+has   "  ...and the plan says so" "$out" "제자리 편집 허용"
+# a --name recorded in the original's flags is passed on explicitly, not "left behind"
+sed -i 's/"--reply-on-resume",/"--reply-on-resume","--name","alpha idle job",/' "$S/jobs/aaaa1111/state.json"
+out="$("$ACCT" handoff aaaa1111 --to beta --dry-run 2>&1)"
+has   "  ...only flags that really stay behind are listed" "$out" "승계 안 함: --reply-on-resume --dangerously-skip-permissions"
+sed -i 's/"--name","alpha idle job",//' "$S/jobs/aaaa1111/state.json"
+out="$("$ACCT" handoff aaaa1111 --to beta --yes -- --settings /tmp/mine.json 2>&1)"; rc=$?
+call="$(last_call)"
+has   "  ...an explicit --settings is respected" "$call" "--settings /tmp/mine.json"
+hasnt "  ...and not overridden" "$call" "bgIsolation"
+sed -i 's/"bgIsolation":"none"/"bgIsolation":"worktree"/' "$S/jobs/aaaa1111/state.json"
+out="$("$ACCT" handoff aaaa1111 --to beta --yes 2>&1)"; rc=$?
+hasnt "  ...any other value is left to the default" "$(last_call)" "--settings"
+sed -i 's/,"bgIsolation":"worktree"//' "$S/jobs/aaaa1111/state.json"
 
 before="$(count_bg)"
 out="$("$ACCT" handoff aaaa2222 --to beta --yes 2>&1)"; rc=$?

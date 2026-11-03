@@ -609,19 +609,33 @@ def cmd_handoff(a, extra):
 
     # 4. plan ------------------------------------------------------------------
     keep, drop = carried_flags(by_acct[owner], jobid)
+    # the name is passed on explicitly below, so it is not "left behind"
+    drop = [d for d in drop if d not in ("--name", "-n") and not d.startswith("--name=")]
     # The new job is a new record: without --name it starts nameless, and the name
     # the original had stays behind with it.  A copy gets a suffix to tell them apart.
     name = (row.get("name") or "").strip()
     name_given = any(x in ("-n", "--name") or x.startswith("--name=") for x in extra)
     new_name = "" if not name or name_given else name + (" (fork)" if mode == "fork" else "")
+    # A background job is by default made to edit in a worktree of its own.  One that
+    # was set up to work in place (bgIsolation "none", recorded in its state) would be
+    # refused every write by its successor, so the setting goes along, as a launch-time
+    # --settings.  Only "none" is carried: it is the one value checked to work this way.
+    original = read_json(os.path.join(by_acct[owner], "jobs", jobid, "state.json")) or {}
+    settings_given = any(x == "--settings" or x.startswith("--settings=") for x in extra)
+    in_place = original.get("bgIsolation") == "none"
+    iso_flags = (["--settings", json.dumps({"worktree": {"bgIsolation": "none"}}, separators=(",", ":"))]
+                 if in_place and not settings_given else [])
     cmd = (["--bg", "--resume", sid] + (["--fork-session"] if mode == "fork" else []) + keep
-           + (["--name", new_name] if new_name else []) + extra)
+           + (["--name", new_name] if new_name else []) + iso_flags + extra)
     stop_cmd = ["stop", jobid]
     print(f"원본      : {owner} / {jobid}  {row.get('name') or ''}")
     print(f"대상      : {target}")
     print(f"세션      : {sid}  ({'복사본(fork)으로' if mode == 'fork' else '같은 ID 로'} 이어받기)")
     print(f"디렉터리  : {tilde(cwd)}")
     print(f"이름      : {new_name or ('(직접 지정: -- 뒤의 --name)' if name_given else '(원본에 이름 없음)')}")
+    if in_place:
+        print("격리      : " + ("제자리 편집 (직접 지정한 --settings 를 따름)" if settings_given
+                               else "제자리 편집 허용 (원본의 bgIsolation=none 승계)"))
     print(f"승계 플래그: {' '.join(keep) or '(없음)'}")
     if drop:
         print(f"승계 안 함: {' '.join(drop)}  (필요하면 -- 뒤에 직접 지정)")

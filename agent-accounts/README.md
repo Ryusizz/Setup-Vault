@@ -289,6 +289,15 @@ $ agent-acct handoff c7d2bfef --to surro2 --stop --yes     # 바로 실행
   복사본(`--fork`)은 원본과 구분되도록 이름 뒤에 ` (fork)` 가 붙습니다. `-- --name 이름`
   으로 직접 지정하면 그걸 쓰고, 원본에 이름이 없으면 붙이지 않습니다. (원래의 첫
   프롬프트 `intent` 는 플래그로 넘길 수 없어 비어 있습니다.)
+- **제자리 편집 설정**을 같이 넘깁니다. 백그라운드 잡은 기본으로 편집 전에 자기 워크트리로
+  격리되는데, 원본이 제자리에서 일하도록 만들어진 잡(상태의 `bgIsolation: "none"`, 대화형
+  세션에서 넘어온 잡이 그렇습니다)이면 이어받은 잡도 쓰기를 거절당해 멈춥니다(`Write`
+  가 "EnterWorktree 먼저" 라며 거절). 그래서 `--settings '{"worktree":{"bgIsolation":"none"}}'`
+  를 시작 명령에 붙이고, 계획에 `격리 : 제자리 편집 허용` 으로 표시합니다. 재시작해도
+  유지됩니다(`respawnFlags` 에 기록). `-- --settings …` 로 직접 주면 그대로 두고, `none`
+  이외의 값은 확인한 적이 없어 승계하지 않습니다. 전역으로 풀고 싶으면 `settings.json` 에
+  `"worktree": {"bgIsolation": "none"}` 을 넣으면 되지만 모든 계정의 모든 백그라운드 잡에
+  적용됩니다.
 - 원본 잡의 `--model`, `--permission-mode`, `--effort` 만 승계합니다. 내부 플래그
   (`--reply-on-resume` 등)와 권한을 넓히는 `--dangerously-skip-permissions` 는
   승계하지 않고 계획에 "승계 안 함"으로 표시합니다. 필요하면 `-- --dangerously-skip-permissions`
