@@ -320,6 +320,78 @@ def session_table(rows, numbered=False):
     return out
 
 
+# A background shell a job started (a dev server, a watcher...) lives in a session
+# of its own with parent 1, so it is not under the job's process tree and stopping
+# the job does not necessarily end it.  The job's own record (`fan` in state.json)
+# names such shells; /proc tells whether one is still there.
+MIN_LABEL = 8  # shorter commands would match unrelated processes
+
+
+def proc_cmdlines():
+    """pid -> command line, for every process we may read (zombies have none)."""
+    out = {}
+    for d in glob.glob("/proc/[0-9]*"):
+        try:
+            with open(d + "/cmdline", "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if raw:
+            out[int(d.rsplit("/", 1)[1])] = raw.replace(b"\0", b" ").decode("utf-8", "replace")
+    return out
+
+
+def background_shells(rows, stores):
+    """Running shells that the background jobs in `rows` started:
+    [{account, job, label, pids}].  Only what the job's record lists *and* a live
+    process matches, so a stale record does not raise a false alarm."""
+    store = dict(stores)
+    skip = ancestor_pids() | {r["pid"] for r in rows}
+    procs, found = None, []
+    for r in rows:
+        if r["kind"] != "bg" or not r["jobId"] or r["account"] not in store:
+            continue
+        state = read_json(os.path.join(store[r["account"]], "jobs", r["jobId"], "state.json")) or {}
+        for task in state.get("fan") or []:
+            label = str(task.get("label") or "").strip()
+            if task.get("kind") != "shell" or len(label) < MIN_LABEL:
+                continue
+            procs = proc_cmdlines() if procs is None else procs
+            pids = sorted(p for p, cmd in procs.items() if label in cmd and p not in skip)
+            if pids:
+                found.append({"account": r["account"], "job": r["name"] or r["jobId"],
+                              "label": label, "pids": pids})
+    return found
+
+
+def shells_still_running(found):
+    """The entries of `found` that still have a live process (gives them 2s to wind down)."""
+    def survivors():
+        procs = proc_cmdlines()
+        return [dict(f, pids=[p for p in f["pids"] if f["label"] in procs.get(p, "")]) for f in found]
+    wait_until(lambda: not any(f["pids"] for f in survivors()), 2)
+    return [f for f in survivors() if f["pids"]]
+
+
+def shell_lines(found):
+    return [f"     {f['account']} / {clip(f['job'], 30)}: {clip(f['label'], 90)}  "
+            f"(pid {', '.join(str(p) for p in f['pids'])})" for f in found]
+
+
+def kill_hint(found):
+    """A command that ends these shells.  Their own process group when the first
+    process leads one (its children, which the command line does not name, go too)."""
+    targets = []
+    for f in found:
+        root = min(f["pids"])
+        try:
+            lead = os.getpgid(root) == root
+        except OSError:
+            lead = False
+        targets.append(f"-{root}" if lead else " ".join(str(p) for p in f["pids"]))
+    return "kill -- " + " ".join(targets)
+
+
 # --------------------------------------------------------------------------- #
 # talking to the real CLI through the wrapper
 # --------------------------------------------------------------------------- #
@@ -649,6 +721,10 @@ def cmd_takeover(a):
     names = ", ".join(sorted({r["account"] for r in others}))
     warn(f"{names} 에서 작업 중인 세션이 {len(others)}개 있습니다 (지금 들어가려는 계정: {target}):")
     render_table(session_table(others))
+    shells = background_shells(others, stores)
+    if shells:
+        print("  ※ 이 잡들이 띄운 백그라운드 셸이 실행 중입니다. 잡을 멈춰도 꺼지지 않을 수 있습니다:")
+        print("\n".join(shell_lines(shells)))
     if not auto:
         print("  [1] 그대로 들어가기   [2] 위 세션을 끊고 들어가기   [3] 취소")
         choice = ask("선택 [3]: ")
@@ -659,6 +735,11 @@ def cmd_takeover(a):
 
     wait = float(os.environ.get("AGENT_ACCT_TERM_WAIT") or 8)
     stuck = [r for r in others if not terminate(r, a.claude, wait, can_ask)]
+    left = shells_still_running(shells) if shells else []
+    if left:
+        warn("백그라운드 셸이 남아 있습니다 (자동으로 끄지 않습니다):")
+        print("\n".join(shell_lines(left)))
+        print("  끄려면: " + kill_hint(left))
     if not stuck:
         msg(f"{len(others)}개를 끊었습니다. {target} 로 들어갑니다.")
         return 0

@@ -99,7 +99,7 @@ printf '%s\n' "$line" >> "$FAKE_LOG"
 case "${1-}" in
   agents) cat "$FAKE_FIXTURES/agents-${AGENT_ACCT_ACTIVE:-alpha}.json" ;;
   stop)   printf '%s\n' "$line"
-          if [ -f "$FAKE_FIXTURES/stop-${2-}.pid" ]; then kill -KILL "$(cat "$FAKE_FIXTURES/stop-$2.pid")" 2>/dev/null
+          if [ -f "$FAKE_FIXTURES/stop-${2-}.pid" ]; then kill -KILL $(cat "$FAKE_FIXTURES/stop-$2.pid") 2>/dev/null
           elif [ -f "$FAKE_SLEEPER_PID" ]; then kill "$(cat "$FAKE_SLEEPER_PID")" 2>/dev/null; fi ;;
   *)      printf '%s\n' "$line" ;;
 esac
@@ -322,6 +322,64 @@ has   "  ...with 'claude stop <job>' as its own account" "$out" "ACTIVE=alpha CW
 has   "  ...naming the job" "$out" "ARGS=stop bgjob9999"
 gone_soon "$X" && t_ok "  ...and it is gone" || t_bad "  ...and it is gone"
 rm -f "$T/fixtures/stop-bgjob9999.pid"; unspawn "$X"
+
+# -- background shells a job leaves behind: told about, never killed -------------
+# A job's dev server runs in a session of its own with parent 1, so the process
+# tree cannot find it; the job's record (`fan`) names it and /proc confirms it.
+mkjobfan() { # <jobId> <fan json array>
+  mkdir -p "$S/jobs/$1"
+  printf '{"state":"working","name":"alpha dev job","sessionId":"%s","fan":%s}\n' "$(sid "$1")" "$2" > "$S/jobs/$1/state.json"
+}
+spawn_shell() { # a detached background shell: own session, parent 1
+  rm -f "$T/sh.pid"
+  ( bash -c 'echo $$ > "$1"; exec setsid sleep 7654.31' _ "$T/sh.pid" </dev/null >/dev/null 2>&1 & )
+  local i; for i in $(seq 1 60); do [ -s "$T/sh.pid" ] && break; sleep 0.05; done
+  SH="$(cat "$T/sh.pid")"; echo "$SH" >> "$T/spawned.pids"
+}
+FAN='[{"id":"s1","kind":"shell","label":"sleep 7654.31"},{"id":"a1","kind":"agent","label":"sleep 7654.31"},{"id":"s2","kind":"shell","label":"sleep 7"}]'
+
+mkjobfan bgjob7777 "$FAN"
+spawn "" bg busy "alpha dev job" bgjob7777 stubborn;         X=$SP_PID
+spawn_shell
+printf '%s\n' "$X" > "$T/fixtures/stop-bgjob7777.pid"
+out="$(printf '1\n' | ENTER -u beta)"; rc=$?
+zero  "job with a running background shell, answer 1" "$rc"
+has   "  ...the menu warns before you choose" "$out" "백그라운드 셸이 실행 중입니다"
+has   "  ...shows its command" "$out" "sleep 7654.31"
+has   "  ...and its pid" "$out" "(pid $SH)"
+eq    "  ...once (an 'agent' entry is not a shell)" "$(printf '%s\n' "$out" | grep -c 'sleep 7654.31')" "1"
+hasnt "  ...a command too short to match safely is ignored" "$out" "sleep 7  (pid"
+alive "$SH" && alive "$X" && t_ok "  ...nothing is stopped" || t_bad "  ...nothing is stopped"
+
+out="$(printf '2\n' | ENTER -u beta)"; rc=$?
+zero  "same job, answer 2 (the job stops, its shell does not)" "$rc"
+gone_soon "$X" && t_ok "  ...the job is stopped" || t_bad "  ...the job is stopped"
+has   "  ...says the shell is still there" "$out" "백그라운드 셸이 남아 있습니다"
+has   "  ...with a command that ends it (its process group)" "$out" "끄려면: kill -- -$SH"
+alive "$SH" && t_ok "  ...and the guard does not kill it" || t_bad "  ...and the guard does not kill it"
+launched "$out" "$BETA" beta && t_ok "  ...claude still starts as beta" || t_bad "  ...claude still starts as beta" "$out"
+kill -KILL "$SH" 2>/dev/null; unspawn "$X"; rm -f "$T/fixtures/stop-bgjob7777.pid"
+
+spawn "" bg busy "alpha dev job" bgjob7777 stubborn;         X=$SP_PID
+spawn_shell
+printf '%s\n%s\n' "$X" "$SH" > "$T/fixtures/stop-bgjob7777.pid"   # this time the stop takes the shell along
+out="$(printf '2\n' | ENTER -u beta)"; rc=$?
+zero  "the shell ends together with the job" "$rc"
+has   "  ...still announced up front" "$out" "백그라운드 셸이 실행 중입니다"
+hasnt "  ...nothing left to report" "$out" "남아 있습니다"
+kill -KILL "$SH" 2>/dev/null; unspawn "$X"; rm -f "$T/fixtures/stop-bgjob7777.pid"
+
+mkjobfan bgjob7778 '[{"id":"s1","kind":"shell","label":"no-such-command-anywhere"}]'
+spawn "" bg busy "alpha dev job 2" bgjob7778;                X=$SP_PID
+out="$(printf '1\n' | ENTER -u beta)"; rc=$?
+hasnt "a recorded shell that is not running raises no alarm" "$out" "백그라운드 셸"
+unspawn "$X"
+spawn "" interactive busy "alpha chat";                      X=$SP_PID
+spawn_shell
+out="$(printf '1\n' | ENTER -u beta)"; rc=$?
+hasnt "an interactive session has no job record: no notice" "$out" "백그라운드 셸"
+kill -KILL "$SH" 2>/dev/null; unspawn "$X"
+rm -rf "$S/jobs/bgjob7777" "$S/jobs/bgjob7778"
 
 # -- never touches itself ------------------------------------------------------
 # The caller is a registered, busy session of another account (alpha) that runs the
