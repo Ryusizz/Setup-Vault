@@ -285,6 +285,10 @@ $ agent-acct handoff c7d2bfef --to surro2 --stop --yes     # 바로 실행
   <세션ID>`, 작업 디렉터리에서). 이 경우 원본 항목이 소유 계정에 그대로 남으므로 그쪽에서
   `attach`/`resume` 하지 마세요. 두 계정에 같은 세션 항목이 있다는 건 `agents` 의 `NOTE`
   로 보입니다. 둘 다 쓸 거면 `--fork` 로 넘기세요.
+- **이름**을 같이 넘깁니다(`--name`). 이어받은 잡은 새 기록이라 이름 없이 시작하기 때문입니다.
+  복사본(`--fork`)은 원본과 구분되도록 이름 뒤에 ` (fork)` 가 붙습니다. `-- --name 이름`
+  으로 직접 지정하면 그걸 쓰고, 원본에 이름이 없으면 붙이지 않습니다. (원래의 첫
+  프롬프트 `intent` 는 플래그로 넘길 수 없어 비어 있습니다.)
 - 원본 잡의 `--model`, `--permission-mode`, `--effort` 만 승계합니다. 내부 플래그
   (`--reply-on-resume` 등)와 권한을 넓히는 `--dangerously-skip-permissions` 는
   승계하지 않고 계획에 "승계 안 함"으로 표시합니다. 필요하면 `-- --dangerously-skip-permissions`

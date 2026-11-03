@@ -186,6 +186,22 @@ hasnt "  ...without internal --reply-on-resume" "$call" "--reply-on-resume"
 hasnt "  ...without widening permissions" "$call" "--dangerously-skip-permissions"
 has   "  ...and says what it left behind" "$out" "승계 안 함: --reply-on-resume --dangerously-skip-permissions"
 has   "  ...warns that the original entry still exists" "$out" "같은 세션이 alpha 에도 항목(aaaa1111)으로 남아 있습니다"
+has   "  ...keeps the job's name (a new job would start nameless)" "$call" "--name alpha idle job"
+has   "  ...and shows it in the plan" "$out" "이름      : alpha idle job"
+
+out="$("$ACCT" handoff aaaa1111 --to beta --yes -- --name mine 2>&1)"; rc=$?
+zero  "a --name given after -- is respected" "$rc"
+call="$(last_call)"
+has   "  ...as given" "$call" "--name mine"
+hasnt "  ...not doubled by the original's name" "$call" "alpha idle job"
+
+cp "$T/fixtures/agents-gamma.json" "$T/fixtures/agents-gamma.json.orig"
+printf '[%s]\n' "$(row bbbb3333 '' done 1500)" > "$T/fixtures/agents-gamma.json"
+out="$("$ACCT" handoff bbbb3333 --from gamma --to alpha --yes 2>&1)"; rc=$?
+zero  "original without a name" "$rc"
+hasnt "  ...gets no empty --name" "$(last_call)" "--name"
+has   "  ...and the plan says why" "$out" "(원본에 이름 없음)"
+mv "$T/fixtures/agents-gamma.json.orig" "$T/fixtures/agents-gamma.json"
 
 before="$(count_bg)"
 out="$("$ACCT" handoff aaaa2222 --to beta --yes 2>&1)"; rc=$?
@@ -196,6 +212,7 @@ eq    "  ...and nothing was launched" "$(count_bg)" "$before"
 out="$("$ACCT" handoff aaaa2222 --to beta --yes --fork 2>&1)"; rc=$?
 zero  "running job with --fork" "$rc"
 has   "  ...starts a copy" "$(last_call)" "--fork-session"
+has   "  ...named so it can be told from the original" "$(last_call)" "--name alpha live job (fork)"
 hasnt "  ...no 'original entry' warning: a copy has its own session" "$out" "같은 세션이 alpha 에도"
 
 out="$(printf '2\n' | AGENT_ACCT_FORCE_INTERACTIVE=1 "$ACCT" handoff aaaa2222 --to beta --yes 2>&1)"; rc=$?

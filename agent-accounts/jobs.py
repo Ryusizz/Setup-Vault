@@ -26,6 +26,7 @@ import argparse
 import glob
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -608,18 +609,25 @@ def cmd_handoff(a, extra):
 
     # 4. plan ------------------------------------------------------------------
     keep, drop = carried_flags(by_acct[owner], jobid)
-    cmd = ["--bg", "--resume", sid] + (["--fork-session"] if mode == "fork" else []) + keep + extra
+    # The new job is a new record: without --name it starts nameless, and the name
+    # the original had stays behind with it.  A copy gets a suffix to tell them apart.
+    name = (row.get("name") or "").strip()
+    name_given = any(x in ("-n", "--name") or x.startswith("--name=") for x in extra)
+    new_name = "" if not name or name_given else name + (" (fork)" if mode == "fork" else "")
+    cmd = (["--bg", "--resume", sid] + (["--fork-session"] if mode == "fork" else []) + keep
+           + (["--name", new_name] if new_name else []) + extra)
     stop_cmd = ["stop", jobid]
     print(f"원본      : {owner} / {jobid}  {row.get('name') or ''}")
     print(f"대상      : {target}")
     print(f"세션      : {sid}  ({'복사본(fork)으로' if mode == 'fork' else '같은 ID 로'} 이어받기)")
     print(f"디렉터리  : {tilde(cwd)}")
+    print(f"이름      : {new_name or ('(직접 지정: -- 뒤의 --name)' if name_given else '(원본에 이름 없음)')}")
     print(f"승계 플래그: {' '.join(keep) or '(없음)'}")
     if drop:
         print(f"승계 안 함: {' '.join(drop)}  (필요하면 -- 뒤에 직접 지정)")
     if a.stop:
         print(f"실행      : claude -u {owner} {' '.join(stop_cmd)}")
-    print(f"실행      : (cd {tilde(cwd)} && claude -u {target} {' '.join(cmd)})")
+    print(f"실행      : (cd {tilde(cwd)} && claude -u {target} {' '.join(shlex.quote(x) for x in cmd)})")
     if mode == "same" and jobid in store_jobs(by_acct[target]):
         warn(f"{target} 에 같은 ID({jobid})의 잡이 이미 있습니다. 그 잡이 이어서 실행될 수 있습니다.")
     if a.dry_run:
