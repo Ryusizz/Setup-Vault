@@ -33,11 +33,21 @@ agent-acct — claude / codex 다중 계정 관리
   agent-acct doctor                     설치/PATH/공유 저장소 점검
   agent-acct path <tool> <id>           해당 계정의 CLI home 경로
 
+  agent-acct agents [--all] [--json]    모든 계정의 claude 백그라운드 에이전트 목록
+                    [--account <id>]    (--all 은 끝난 잡까지)
+  agent-acct handoff [<id|이름>]        잡의 대화를 다른 계정으로 넘겨 이어받기
+                    [--to <계정>] [--from <계정>] [--stop | --fork]
+                    [--yes] [--dry-run] [-- <claude 인자…>]
+                                        <id> 를 생략하면 목록에서 번호로 고릅니다
+
   tool = claude | codex   (생략 시 둘 다)
 
 사용 예:
   claude -u d2                 # d2 계정으로 Claude Code 실행
   codex --user alice exec "…"  # alice 계정으로 Codex 실행
+  agent-acct agents --all      # 계정마다 따로 보이던 에이전트를 한 표로
+  claude -u d2 logs 1f225e72   # 다른 계정 소유 잡이면 자동으로 그 계정으로 실행
+  agent-acct handoff           # 한도에 걸린 계정의 잡을 다른 계정으로 이어받기
 USAGE
   exit 2
 }
@@ -238,8 +248,14 @@ cmd_doctor() {
   done
   printf '\n'
   cmd_list
+  printf '\n[claude 백그라운드 잡]\n'
+  python3 "$AA_JOBS_PY" summary || ok=1
   return $ok
 }
+
+# agents / handoff: cross-account view of the (per-account) background jobs
+cmd_agents()  { python3 "$AA_JOBS_PY" agents "$@"; }
+cmd_handoff() { python3 "$AA_JOBS_PY" handoff "$@"; }
 
 [ $# -ge 1 ] || usage
 sub="$1"; shift
@@ -257,6 +273,8 @@ case "$sub" in
   rm|remove)   cmd_rm "$@" ;;
   path)        cmd_path "$@" ;;
   doctor)      cmd_doctor "$@" ;;
+  agents)      cmd_agents "$@" ;;
+  handoff)     cmd_handoff "$@" ;;
   dump)        aa_reg dump ;;
   -h|--help|help) usage ;;
   *) aa_err "알 수 없는 명령: $sub"; usage ;;

@@ -4,6 +4,7 @@
 #   claude              -> real claude, untouched (current login)
 #   claude -u d2 ...    -> real claude with CLAUDE_CONFIG_DIR pointed at d2's store
 #   codex --user=alice  -> real codex with CODEX_HOME pointed at alice's store
+#   claude [-u X] logs <id>  -> runs as the account that owns <id> if X does not
 #
 # Everything except the account flag is forwarded verbatim.
 set -uo pipefail
@@ -70,6 +71,14 @@ elif [ "$AA_TOOL" = claude ] && [ "${args[0]-}" = auth ] && [ "${args[1]-}" = lo
   is_login_flow=1
 fi
 
+# `claude attach|logs|stop|rm|respawn <id>` only see the jobs of the account they
+# run as (each account has its own agent daemon). If the job is not there but is
+# in exactly one other account, run as that account instead. Fallback only: a
+# call that finds its job where it was aimed is left exactly as it was.
+if [ -z "$account" ] && [ "$AA_TOOL" = claude ]; then
+  routed="$(aa_route_job "${CLAUDE_CONFIG_DIR:-$AA_CLAUDE_SHARED}" ${args+"${args[@]}"})" && account="$routed"
+fi
+
 # No account flag: behave exactly as before this wrapper existed — except that a
 # login still gets the credential guard, since an abandoned one would otherwise
 # leave the account logged out.
@@ -122,6 +131,11 @@ fi
 # --------------------------------------------------------------------------- #
 # Point the CLI at that account's store
 # --------------------------------------------------------------------------- #
+# Same job-owner fallback as above, for an explicit `-u <account>`.
+if [ "$AA_TOOL" = claude ]; then
+  routed="$(aa_route_job "$(aa_store_dir claude "$id")" ${args+"${args[@]}"})" && id="$routed"
+fi
+
 mode="$(aa_reg mode "$id" "$AA_TOOL")"
 store="$(aa_store_dir "$AA_TOOL" "$id")"
 [ "$mode" = native ] || aa_sync_overlay "$AA_TOOL" "$id"

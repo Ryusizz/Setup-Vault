@@ -179,7 +179,11 @@ agent-acct sync [<id>]             오버레이 링크 재동기화
 agent-acct which <alias>           약어 -> 계정 ID
 agent-acct path <tool> <id>        해당 계정의 CLI home
 agent-acct rm <id>                 등록 해제 (오버레이 삭제 확인)
-agent-acct doctor                  설치/PATH/저장소 점검
+agent-acct doctor                  설치/PATH/저장소/잡 격리 점검
+agent-acct agents [--all] [--json] [--account <id>]
+                                   모든 계정의 claude 백그라운드 에이전트 목록
+agent-acct handoff [<id|이름>] [--to <계정>] [--stop|--fork] [--yes] [--dry-run]
+                                   잡의 대화를 다른 계정으로 넘겨 이어받기
 ```
 
 ## Codex 세션의 남은 writer 종료
@@ -204,10 +208,99 @@ codex-unlock --yes --force 01a0855a-f821-7503-83e1-905ce7ae2782
 확인도 생략합니다. 단순히 빈 lock 파일을 지우지는 않습니다. writer가 살아 있는
 상태에서 파일만 지우면 두 프로세스가 같은 세션을 동시에 쓸 수 있기 때문입니다.
 
+## 백그라운드 에이전트(잡)는 계정별입니다
+
+`claude agents`, `attach`, `logs`, `stop`, `rm`, `respawn` 은 **현재 계정의 데몬과
+`jobs/`** 만 봅니다. 위 표처럼 `daemon*` 와 `jobs/` 는 일부러 계정별로 분리돼 있어서
+(공유하면 잡이 먼저 데몬을 띄운 계정의 할당량으로 돕니다) `claude -u surro1 agents`
+와 `claude -u surro2 agents` 는 서로 다른 목록을 보여줍니다. 이 분리는 그대로 두고,
+그 위에 세 가지를 얹었습니다.
+
+### 1. 한 표로 보기 — `agent-acct agents`
+
+```
+$ agent-acct agents --all
+ACCOUNT  ID        STATE    STATUS  NAME                        CWD
+-------  --------  -------  ------  --------------------------  ---------------------
+surro1   c7d2bfef  done     idle    release notes draft         ~/Programming/app
+surro2   a1b2c3d4  working  busy    fix flaky login test        ~/Programming/web
+```
+(예시입니다.)
+
+`--all` 은 끝난 잡까지, `--json` 은 `account` 필드가 붙은 JSON, `--account <id>` 는 한
+계정만. 같은 세션이 두 계정에 있으면(아래 handoff 로 같은 ID 로 이어받은 경우) `NOTE`
+열에 `같은 세션: <계정>` 이 붙습니다 — `sessions/` 는 공유라서 그 세션의 `STATUS` 가
+양쪽 행에 똑같이 보이기 때문입니다.
+
+`claude agents` 화면(TUI)은 바이너리 안쪽이라 래퍼가 합칠 수 없어서 계속 현재 계정
+것만 보입니다. 전체는 이 명령으로 보세요.
+
+### 2. 다른 계정의 잡을 id 로 조작하기 — 자동 라우팅
+
+```
+claude -u surro2 logs c7d2bfef     # c7d2bfef 는 surro1 소유 → surro1 로 실행합니다
+claude attach c7d2bfef             # -u 없이도 마찬가지
+```
+
+대상은 `attach`, `logs`, `stop`/`kill`, `rm`, `respawn <id|이름>` 입니다. 소유 계정을
+찾을 때는 id(4글자 이상이면 앞부분만으로도), 세션 UUID, 이름(일부만 써도, 대소문자
+무시)을 순서대로 비교합니다. 이름 일부로 찾는 건 CLI 도 지원하는 방식이고, id prefix 는
+이 라우팅 쪽 기준입니다.
+
+- **폴백일 뿐입니다.** 요청한 계정(`-u`, 없으면 현재 로그인)에 그 잡이 있으면 아무것도
+  바꾸지 않습니다. 같은 ID 가 두 계정에 있어도 요청한 계정이 우선입니다.
+- 다른 계정 **둘 이상**과 일치하면 고르지 않고 `-u <계정>` 을 요구합니다.
+- 끄려면 `AGENT_ACCT_NO_ROUTE=1`.
+- 바뀌는 건 *조작 대상 계정*뿐입니다. 라우팅된 `attach` 로 대화하면 그 잡의 **소유
+  계정** 할당량을 씁니다. 다른 계정 사용량으로 이어가려면 아래 handoff 를 쓰세요.
+
+### 3. 다른 계정 사용량으로 이어받기 — `agent-acct handoff`
+
+한 계정이 한도에 걸렸을 때, 그 계정의 잡 대화를 다른 계정에서 새 백그라운드 잡으로
+이어받습니다. 대화 내용은 공유된 `projects/*.jsonl` 에 있으므로 문맥이 그대로
+복원됩니다.
+
+```
+$ agent-acct handoff                      # 목록에서 번호로 고르기
+  #  ACCOUNT  ID        STATE   STATUS  NAME                      CWD
+  1  surro1   c7d2bfef  done    idle    poke-battle-lab 인수인계  ~/Programming/poke-battle-lab
+  ...
+넘길 잡 번호 (q=취소): 1
+…
+$ agent-acct handoff c7d2bfef --to surro2 --stop --yes     # 바로 실행
+```
+
+옵션: `--to <계정>`(로그인된 다른 계정이 하나면 생략), `--from <계정>`(같은 id 가 여러
+계정에 있을 때), `--stop`, `--fork`, `--yes`, `--dry-run`, `-- <claude 인자…>`.
+
+- **같은 대화에 두 프로세스가 쓰지 않게 막습니다.** 공유 `sessions/<pid>.json` 으로 그
+  세션이 지금 실행 중인지 봅니다(pid 가 살아 있고 `procStart` 가 `/proc` 의
+  starttime 과 같아야 하므로, 재사용된 pid 나 좀비는 실행 중으로 치지 않습니다). 실행
+  중이면 `--stop`(소유 계정에서 멈춘 뒤 이어받기) 또는 `--fork`(새 세션 ID 의 복사본으로
+  이어받기)를 요구합니다. `done` 이어도 `idle` 인 worker 프로세스가 남아 있으면
+  실행 중입니다. 터미널에서는 선택지를 묻습니다.
+- 실행 중이 아니면 **같은 세션 ID** 로 이어받습니다(`claude -u <대상> --bg --resume
+  <세션ID>`, 작업 디렉터리에서). 이 경우 원본 항목이 소유 계정에 그대로 남으므로 그쪽에서
+  `attach`/`resume` 하지 마세요. 두 계정에 같은 세션 항목이 있다는 건 `agents` 의 `NOTE`
+  로 보입니다. 둘 다 쓸 거면 `--fork` 로 넘기세요.
+- 원본 잡의 `--model`, `--permission-mode`, `--effort` 만 승계합니다. 내부 플래그
+  (`--reply-on-resume` 등)와 권한을 넓히는 `--dangerously-skip-permissions` 는
+  승계하지 않고 계획에 "승계 안 함"으로 표시합니다. 필요하면 `-- --dangerously-skip-permissions`
+  처럼 직접 넘기세요.
+- 넘어가는 건 **대화**입니다. 원본 잡의 상태 파일·`tmp/`, 진행 중이던 태스크·모니터·
+  프로세스는 넘어오지 않습니다. 이어받은 잡은 프롬프트를 보내기 전까지 idle 이라 모델
+  호출이 없고, 대상 계정 사용량은 그 뒤 대화부터 쓰입니다.
+- 비대화형(스크립트)에서는 잡 id 와 `--yes` 가 필요합니다.
+
+`agent-acct doctor` 는 계정별 잡 수와 함께 `daemon`/`jobs` 가 심볼릭 링크로 바뀌어
+격리가 깨졌는지, 로그인이 없는 계정에 잡이 갇혀 있는지를 점검합니다.
+
 ## 알아둘 점
 
-- **옵션 없이 실행하면 지금까지와 100% 동일**합니다. 환경변수를 건드리지 않으므로
-  VS Code 확장이나 다른 스크립트가 CLI 를 직접 불러도 안전합니다.
+- **옵션 없이 실행하면 지금까지와 동일**합니다. 환경변수를 건드리지 않으므로
+  VS Code 확장이나 다른 스크립트가 CLI 를 직접 불러도 안전합니다. 유일한 예외는 위의
+  자동 라우팅으로, `attach`/`logs`/`stop`/`rm`/`respawn <id>` 가 *원래라면
+  "No job matching" 으로 실패했을* 때만 소유 계정으로 바꿉니다.
 - `adopt` 로 편입한 계정은 `mode=native` — 저장소가 `~/.claude`, `~/.codex` 자체입니다.
   CLI 당 native 계정은 하나뿐이고, 나머지는 오버레이를 씁니다.
 - `--resume` 는 계정과 무관하게 전체 세션을 보여줍니다. 반면 `-c/--continue` 가
@@ -215,7 +308,8 @@ codex-unlock --yes --force 01a0855a-f821-7503-83e1-905ce7ae2782
   계정을 바꿔 이어받을 때는 `--resume` 를 쓰세요.
 - 두 계정을 **동시에** 띄우는 것도 됩니다(SQLite 잠금이 처리). 다만 Codex 의
   app-server 데몬과 Claude 의 백그라운드 데몬은 계정별로 분리돼 있어,
-  한 계정에서 띄운 백그라운드 잡은 다른 계정의 목록에 나타나지 않습니다.
+  한 계정에서 띄운 백그라운드 잡은 다른 계정의 `claude agents` 에 나타나지 않습니다.
+  전체 목록·조작·이어받기는 위 「백그라운드 에이전트(잡)는 계정별입니다」를 보세요.
 - **중단된 로그인은 되돌립니다.** `codex login` 은 시작하자마자 기존 `auth.json` 을
   지우기 때문에, Ctrl-C 나 끊긴 SSH 로 로그인이 끝나지 않으면 멀쩡하던 계정이
   로그아웃 상태가 됩니다. 래퍼는 로그인 전에 인증 파일을 복사해 두고, 새 인증이
@@ -239,6 +333,8 @@ agent-accounts/
   agent-acct     계정 관리 CLI
   codex-unlock   thread writer lock 소유 Codex 프로세스 종료
   registry.py    계정/약어 레지스트리 (JSON)
-  lib.sh         오버레이 동기화, 저장소 경로, 로그인 상태 조회
+  jobs.py        계정 간 백그라운드 잡: 소유자 탐색·라우팅, 병합 목록, handoff
+  lib.sh         오버레이 동기화, 저장소 경로, 로그인 상태 조회, 잡 라우팅
   bin/           PATH 에 올라가는 심볼릭 링크
+  test/run.sh    임시 샌드박스 + 가짜 claude 로 도는 테스트 (bash test/run.sh)
 ```

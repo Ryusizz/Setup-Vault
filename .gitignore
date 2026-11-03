@@ -8,3 +8,7 @@ MobaXterm Sessions.mxtsessions
 .env
 .env.*
 !.env.example
+
+# Python bytecode (agent-accounts/*.py are run and imported from source)
+__pycache__/
+*.pyc

@@ -11,6 +11,7 @@
 
 AA_ROOT="${AA_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 AA_REGISTRY_PY="$AA_ROOT/registry.py"
+AA_JOBS_PY="$AA_ROOT/jobs.py"
 
 AA_CLAUDE_SHARED="${AGENT_ACCT_CLAUDE_HOME:-$HOME/.claude}"
 AA_CODEX_SHARED="${AGENT_ACCT_CODEX_HOME:-$HOME/.codex}"
@@ -298,6 +299,52 @@ else:
     for row in rows[1:]:
         emit(row)
 '
+}
+
+# --------------------------------------------------------------------------- #
+# Background jobs live in a per-account daemon (see AA_PRIVATE_claude), so
+# `claude attach|logs|stop|rm|respawn <id>` only finds the caller's own jobs.
+# --------------------------------------------------------------------------- #
+
+# aa_job_ref_from_args <args...> -> the <id|name> of a job subcommand, if any.
+# `respawn --all` and anything that is not a job subcommand yield nothing.
+aa_job_ref_from_args() {
+  case "${1-}" in
+    attach|logs|stop|kill|rm|respawn) ;;
+    *) return 1 ;;
+  esac
+  shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in -*) continue ;; esac
+    printf '%s\n' "$arg"
+    return 0
+  done
+  return 1
+}
+
+# aa_route_job <requested store> <claude args...>
+#
+# Prints the owning account id (exit 0) when the job is NOT in the requested
+# store but is in exactly one other account's. Strictly a fallback: a call whose
+# job is found where it was aimed is never touched, so everything that worked
+# before behaves the same. AGENT_ACCT_NO_ROUTE=1 turns it off.
+aa_route_job() {
+  local store="$1"; shift
+  [ -z "${AGENT_ACCT_NO_ROUTE:-}" ] || return 1
+  local ref out rc owner jobid
+  ref="$(aa_job_ref_from_args "$@")" || return 1
+  out="$(python3 "$AA_JOBS_PY" route "$ref" --current "$store")"; rc=$?
+  case "$rc" in
+    0)
+      IFS=$'\t' read -r owner jobid <<< "$out"
+      aa_msg "'$jobid' 는 '$owner' 계정의 잡입니다 → '$owner' 로 실행합니다."
+      printf '%s\n' "$owner" ;;
+    4)
+      aa_warn "'$ref' 가 여러 계정/잡과 일치해 자동으로 고르지 않습니다. -u <계정> 으로 지정하세요."
+      return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # --------------------------------------------------------------------------- #
