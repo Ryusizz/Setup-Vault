@@ -8,6 +8,12 @@
 # `agent-acct handoff` (incl. the double-writer guards) and `doctor`'s job check.
 set -uo pipefail
 
+# The suite must behave the same whether or not it is started from a terminal.
+# With a tty on stdin, `agent-acct handoff` rightly asks questions (e.g. "stop or
+# fork?") and would sit waiting for an answer nobody can see. Tests that need
+# input pipe it in explicitly.
+exec </dev/null
+
 AA="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 T="$(mktemp -d)"
 cleanup() {
