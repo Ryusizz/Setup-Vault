@@ -12,3 +12,6 @@ MobaXterm Sessions.mxtsessions
 # Python bytecode (agent-accounts/*.py are run and imported from source)
 __pycache__/
 *.pyc
+
+# Agent state and Python caches
+.omc/
