@@ -52,6 +52,7 @@ DB 에 그대로 들어갑니다(검증 완료). 그래서 `-wal`/`-shm` 은 링
 | claude | `.credentials.json` | OAuth 토큰 |
 | claude | `.claude.json`, `backups/` | 계정 정보 + 계정 단위 캐시. 새 계정에는 인증 관련 키만 제거하고 복사해서 온보딩/신뢰 프롬프트를 건너뜁니다 |
 | claude | `daemon*`, `jobs/` | 백그라운드 에이전트 데몬. 공유하면 잡이 "먼저 데몬을 띄운 계정"의 할당량으로 돌아버립니다 |
+| claude | `.last-update-result.json` | 자동 업데이트 기록. claude 가 임시 파일+rename 으로 덮어써 링크가 실제 파일로 바뀔 수 있고, 공유 쪽에도 이미 있어 sync 가 매번 경고만 냈습니다 |
 | codex | `auth.json` | OAuth 토큰 |
 | codex | `models_cache.json` | 요금제별로 모델 목록이 다름 |
 
