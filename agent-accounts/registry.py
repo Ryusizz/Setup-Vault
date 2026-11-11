@@ -12,7 +12,10 @@ Schema:
     "<id>": {
       "aliases": ["d2", ...],
       "label": "human readable",
-      "tools": {"claude": {"mode": "native"|"overlay"}, "codex": {...}}
+      "tools": {"claude": {"mode": "native"|"overlay"|"none"}, "codex": {...}}
+
+"none" = this account has no login for that tool; it is hidden from
+`agent-acct list` and the wrapper refuses `<tool> -u <id>`.
     }
   }
 }
@@ -237,7 +240,7 @@ def cmd_rm(argv):
 
 
 def cmd_set_mode(argv):
-    """set-mode <id> <tool> <native|overlay>"""
+    """set-mode <id> <tool> <native|overlay|none>"""
     data = load()
     acct_id = resolve(data, argv[0])
     if acct_id is None:
@@ -245,7 +248,7 @@ def cmd_set_mode(argv):
     tool, m = argv[1], argv[2]
     if tool not in TOOLS:
         fail(f"unknown tool: {tool}")
-    if m not in ("native", "overlay"):
+    if m not in ("native", "overlay", "none"):
         fail(f"unknown mode: {m}")
     if m == "native":
         holder = native_holder(data, tool)

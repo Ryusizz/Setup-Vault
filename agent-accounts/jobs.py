@@ -120,6 +120,8 @@ def account_stores():
     shared = shared_dir()
     out = []
     for acct in sorted(data["accounts"]):
+        if registry.mode(data, acct, "claude") == "none":
+            continue  # claude disabled for this account (agent-acct disable)
         if registry.mode(data, acct, "claude") == "native":
             path = shared
         else:

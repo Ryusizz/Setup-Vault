@@ -30,6 +30,7 @@ agent-acct — claude / codex 다중 계정 관리
   agent-acct sync [<id>]                오버레이 심볼릭 링크 재동기화
   agent-acct which <alias>              약어 -> 계정 ID
   agent-acct rm <id>                    계정 등록 해제 (오버레이 삭제 여부 확인)
+  agent-acct disable|enable <tool> <id> 이 계정에서 해당 도구만 끄기/켜기
   agent-acct doctor                     설치/PATH/공유 저장소 점검
   agent-acct path <tool> <id>           해당 계정의 CLI home 경로
 
@@ -68,10 +69,10 @@ cmd_list() {
   {
     printf 'ID\tALIASES\tLABEL\tCLAUDE\tCODEX\n'
     while IFS=$'\t' read -r id aliases label mclaude mcodex; do
-      sclaude="$(aa_login_status claude "$id")"
-      scodex="$(aa_login_status codex "$id")"
+      if [ "$mclaude" = none ]; then sclaude="-"; else sclaude="$(aa_login_status claude "$id") [$mclaude]"; fi
+      if [ "$mcodex" = none ]; then scodex="-"; else scodex="$(aa_login_status codex "$id") [$mcodex]"; fi
       printf '%s\t%s\t%s\t%s\t%s\n' \
-        "$id" "$aliases" "$label" "$sclaude [$mclaude]" "$scodex [$mcodex]"
+        "$id" "$aliases" "$label" "$sclaude" "$scodex"
     done <<< "$rows"
   } | aa_render_table
 }
@@ -169,6 +170,7 @@ cmd_status() {
   for id in "${ids[@]}"; do
     printf '%s\n' "$id"
     for tool in $(aa_tools); do
+      [ "$(aa_reg mode "$id" "$tool")" = none ] && { printf '  %-7s %-10s %s\n' "$tool" "[none]" "-"; continue; }
       printf '  %-7s %-10s %s\n' "$tool" "[$(aa_reg mode "$id" "$tool")]" "$(aa_login_status "$tool" "$id")"
     done
   done
@@ -184,7 +186,7 @@ cmd_sync() {
   fi
   for id in "${ids[@]}"; do
     for tool in $(aa_tools); do
-      [ "$(aa_reg mode "$id" "$tool")" = native ] && continue
+      case "$(aa_reg mode "$id" "$tool")" in native|none) continue ;; esac
       [ -d "$(aa_shared_dir "$tool")/.accounts/$id" ] || continue
       aa_sync_overlay "$tool" "$id"
       aa_msg "$tool/$id 동기화 완료"
@@ -215,6 +217,30 @@ cmd_rm() {
       aa_warn "오버레이는 남겨뒀습니다. 필요하면 직접 지우세요."
     fi
   fi
+}
+
+# disable <tool> <id> — this account has no <tool> login: hide it from list and
+# make the wrapper refuse `<tool> -u <id>`. enable <tool> <id> undoes it.
+cmd_disable() {
+  [ $# -eq 2 ] || usage
+  local tool="$1" id; id="$(aa_reg resolve "$2")" || aa_die "알 수 없는 계정: $2"
+  case "$(aa_reg mode "$id" "$tool")" in
+    native) aa_die "$tool: '$id' 는 기본(native) 저장소를 쓰고 있어 끌 수 없습니다." ;;
+  esac
+  local overlay; overlay="$(aa_shared_dir "$tool")/.accounts/$id"
+  if [ -d "$overlay" ] && aa_has_creds "$tool" "$overlay"; then
+    aa_die "$tool: '$id' 에 로그인 정보가 있습니다($overlay). 먼저 'agent-acct logout $tool $id' 를 하세요."
+  fi
+  aa_reg set-mode "$id" "$tool" none || exit 1
+  aa_msg "$tool: '$id' 를 목록에서 뺐습니다. (되돌리기: agent-acct enable $tool $id)"
+}
+
+cmd_enable() {
+  [ $# -eq 2 ] || usage
+  local tool="$1" id; id="$(aa_reg resolve "$2")" || aa_die "알 수 없는 계정: $2"
+  [ "$(aa_reg mode "$id" "$tool")" = none ] || { aa_msg "$tool: '$id' 는 이미 켜져 있습니다."; return 0; }
+  aa_reg set-mode "$id" "$tool" overlay || exit 1
+  aa_msg "$tool: '$id' 를 다시 켰습니다. 'agent-acct login $tool $id' 로 로그인하세요."
 }
 
 cmd_which() { [ $# -eq 1 ] || usage; aa_reg resolve "$1" || aa_die "알 수 없는 계정: $1"; }
@@ -264,6 +290,8 @@ cmd_running() { python3 "$AA_JOBS_PY" running "$@"; }
 sub="$1"; shift
 case "$sub" in
   list|ls)     cmd_list "$@" ;;
+  disable)     cmd_disable "$@" ;;
+  enable)      cmd_enable "$@" ;;
   add)         cmd_add "$@" ;;
   adopt)       cmd_adopt "$@" ;;
   alias)       aa_reg alias "$@" ;;

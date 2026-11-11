@@ -440,6 +440,7 @@ aa_login() {
   local store real
   store="$(aa_store_dir "$tool" "$id")"
   real="$(aa_real_bin "$tool")" || aa_die "cannot find the real '$tool' executable on PATH"
+  [ "$(aa_reg mode "$id" "$tool")" = none ] && aa_die "$tool: '$id' 는 꺼져 있습니다. 'agent-acct enable $tool $id' 후 로그인하세요."
   [ "$(aa_reg mode "$id" "$tool")" = native ] || aa_sync_overlay "$tool" "$id" quiet
 
   local extra=() rc

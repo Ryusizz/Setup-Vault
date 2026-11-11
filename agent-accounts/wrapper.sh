@@ -142,6 +142,7 @@ if [ "$AA_TOOL" = claude ]; then
 fi
 
 mode="$(aa_reg mode "$id" "$AA_TOOL")"
+[ "$mode" = none ] && aa_die "'$id' 계정은 $AA_TOOL 을(를) 쓰지 않도록 꺼져 있습니다. (켜기: agent-acct enable $AA_TOOL $id)"
 store="$(aa_store_dir "$AA_TOOL" "$id")"
 [ "$mode" = native ] || aa_sync_overlay "$AA_TOOL" "$id"
 

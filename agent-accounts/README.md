@@ -179,6 +179,7 @@ agent-acct sync [<id>]             오버레이 링크 재동기화
 agent-acct which <alias>           약어 -> 계정 ID
 agent-acct path <tool> <id>        해당 계정의 CLI home
 agent-acct rm <id>                 등록 해제 (오버레이 삭제 확인)
+agent-acct disable|enable <tool> <id>  한 도구만 끄기/켜기 (그 도구 로그인이 없는 계정)
 agent-acct doctor                  설치/PATH/저장소/잡 격리 점검
 agent-acct agents [--all] [--json] [--account <id>]
                                    모든 계정의 claude 백그라운드 에이전트 목록
